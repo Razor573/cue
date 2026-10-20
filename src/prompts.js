@@ -10,9 +10,11 @@ function formatTranscript(turns, limit) {
   return recent.map((t) => (t.channel === 'them' ? 'Them: ' : 'You: ') + t.text).join('\n');
 }
 
-function buildSystem(base, contextBlock) {
-  if (!contextBlock) return base;
-  return contextBlock + '\n\n' + base;
+function buildSystem(base, contextBlock, priorityDirectives) {
+  let res = base;
+  if (contextBlock) res = contextBlock + '\n\n' + res;
+  if (priorityDirectives) res = res + '\n\n' + priorityDirectives;
+  return res;
 }
 
 // Apply AI rules to a system prompt if the mode wants them. LeetCode returns
@@ -241,4 +243,4 @@ const MODES = {
   }
 };
 
-module.exports = { MODES, formatTranscript, PHANTOM_LENS_DIRECTIVES };
+module.exports = { MODES, formatTranscript, PHANTOM_LENS_DIRECTIVES, buildSystem, applyRules };

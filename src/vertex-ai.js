@@ -350,8 +350,8 @@ function buildVertexPayload(params = {}, modelId = '') {
   });
 
   const cleanModel = cleanVertexModelId(modelId);
-  const lvl = String(thinkingLevel || '').toUpperCase();
-  const includeThinking = /^gemini-3/i.test(cleanModel) && (lvl === 'LOW' || lvl === 'MEDIUM' || lvl === 'HIGH');
+  const lvl = String(thinkingLevel || 'MEDIUM').toUpperCase();
+  const includeThinking = /^gemini-[34]/i.test(cleanModel) && (lvl === 'LOW' || lvl === 'MEDIUM' || lvl === 'HIGH');
   const headroom = includeThinking ? (lvl === 'HIGH' ? 4096 : 1024) : 1024;
 
   const generationConfig = {
@@ -363,6 +363,11 @@ function buildVertexPayload(params = {}, modelId = '') {
     generationConfig.thinkingConfig = {
       thinkingLevel: lvl,
       includeThoughts: true
+    };
+  } else if (params.includeThoughts) {
+    generationConfig.thinkingConfig = {
+      includeThoughts: true,
+      thinkingBudget: -1
     };
   }
 

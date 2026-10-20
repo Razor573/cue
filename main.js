@@ -5,7 +5,7 @@ const store = require('./src/store');
 const { captureScreenshot } = require('./src/screen');
 const { createSTT } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
-const { createLLM, listProviderModels, testProviderConnection } = require('./src/llm');
+const { createLLM, listProviderModels, testProviderConnection, listGeminiSTTModels } = require('./src/llm');
 const { validateServiceAccountJson } = require('./src/vertex-ai');
 const { MODES } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
@@ -810,7 +810,7 @@ async function runFeature(mode, userText) {
     const category = mode !== 'leetcode' ? detectCategory(transcript) : null;
 
     // Command-like sentence detection & session directives
-    const directiveMatch = (userText || '').match(/^(in this (assessment|interview|test|exam)|for this session|always|from now on|never|format:|remember:|give me .+ and .+ for all questions)/i);
+    const directiveMatch = (userText || '').match(/^(in this (assessment|interview|test|exam|session)|for this (session|meeting|interview|assessment)|always|from now on|never|format:|remember:|give me |use format|only give|respond with)/i);
     if (directiveMatch) {
       const trimmed = userText.trim();
       if (!sessionDirectives.includes(trimmed)) {
@@ -898,10 +898,22 @@ async function runFeature(mode, userText) {
     }
     // Summaries of the last few meetings, so "what did we agree last time?"
     // has something to draw on. Never the current meeting, never leetcode.
+    const priorityOverrideBlock = activeInstructions.length > 0
+      ? '\n\n================================================================================\nCRITICAL ACTIVE SESSION DIRECTIVES & USER INSTRUCTIONS (TOP PRIORITY OVERRIDE):\nYou MUST follow these specific instructions and directives above all standard default formatting rules:\n' +
+        activeInstructions.map(d => `- ${d}`).join('\n') +
+        '\nIf these directives request a specific response format, answer structure, or length (e.g. "give me best and second best", "full script for 2 minutes"), PRECISELY SATISFY THIS DIRECTIVE.\n================================================================================'
+      : '';
+
     const memoryBlock = mode !== 'leetcode' && meetingMemory ? meetingMemory.memoryBlock() : null;
     if (memoryBlock) contextBlock = contextBlock ? contextBlock + '\n\n' + memoryBlock : memoryBlock;
-    const system = def.buildSystem ? def.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (def.system || '');
-    const built = def.build({ transcript, userText: userText || '' });
+    let system = def.buildSystem ? def.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (def.system || '');
+    if (priorityOverrideBlock) {
+      system = system + priorityOverrideBlock;
+    }
+    let built = def.build({ transcript, userText: userText || '' });
+    if (activeInstructions.length > 0) {
+      built = `[ACTIVE SESSION DIRECTIVES: ${activeInstructions.join(' | ')}]\n\n` + built;
+    }
 
     // Watchdog: a provider that stalls mid-stream would otherwise hang the await forever,
     // leaving state.busy = true and wedging every later question until an app restart.
@@ -967,6 +979,11 @@ async function runFeature(mode, userText) {
 // renderer, and the renderer's whole-object Save can never clobber it.
 ipcMain.handle('settings:get', () => store.redactForRenderer(store.getSettings()));
 ipcMain.handle('models:list', async (_e, params = {}) => listProviderModels(store.getSettings(), params || {}));
+ipcMain.handle('stt:gemini-models', async (_e, params = {}) => {
+  const settings = store.getSettings();
+  const apiKey = (params && params.apiKey) || settings.apiKeys?.gemini || '';
+  return await listGeminiSTTModels(apiKey);
+});
 ipcMain.handle('llm:test-connection', async (_e, params = {}) => testProviderConnection(store.getSettings(), params || {}));
 ipcMain.handle('vertex:parse-sa', async (_e, rawJson) => {
   try {

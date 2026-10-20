@@ -70,13 +70,23 @@ const TRANSCRIBE_MODEL_COOLDOWN_MS = 60000;
 let transcribeModelDownUntil = 0;
 
 // Split from transcribeGemini so tests can pass a fake client.
-async function transcribeGeminiWith(ai, wav, now = Date.now()) {
+async function transcribeGeminiWith(ai, wav, modelOrNow, maybeNow) {
+  let primaryModel = GEMINI_TRANSCRIBE_MODEL;
+  let now = Date.now();
+  if (typeof modelOrNow === 'number') {
+    now = modelOrNow;
+  } else if (typeof modelOrNow === 'string' && modelOrNow) {
+    primaryModel = modelOrNow;
+    if (typeof maybeNow === 'number') now = maybeNow;
+  } else if (typeof maybeNow === 'number') {
+    now = maybeNow;
+  }
   const audio = { inlineData: { mimeType: 'audio/wav', data: wav.toString('base64') } };
   if (now >= transcribeModelDownUntil) {
     try {
-      // The dedicated transcription model needs no instruction prompt.
+      // Dedicated transcription model (model: GEMINI_TRANSCRIBE_MODEL)
       const res = await ai.models.generateContent({
-        model: GEMINI_TRANSCRIBE_MODEL,
+        model: primaryModel || GEMINI_TRANSCRIBE_MODEL,
         contents: [{ role: 'user', parts: [audio] }]
       });
       return extractGeminiTranscript(res);
@@ -98,9 +108,9 @@ async function transcribeGeminiWith(ai, wav, now = Date.now()) {
   return extractGeminiTranscript(res);
 }
 
-async function transcribeGemini(apiKey, wav) {
+async function transcribeGemini(apiKey, wav, modelId) {
   const { GoogleGenAI } = require('@google/genai');
-  return transcribeGeminiWith(new GoogleGenAI({ apiKey }), wav);
+  return transcribeGeminiWith(new GoogleGenAI({ apiKey }), wav, modelId);
 }
 
 function createSTT(settings) {
@@ -119,12 +129,9 @@ function createSTT(settings) {
     chain.push({ p: 'groq', m: model, fn: (wav) => transcribeOpenAI(keys.groq, wav, model, 'https://api.groq.com/openai/v1', vocabPrompt) });
   }
   if ((selectedProvider === 'auto' || selectedProvider === 'gemini') && keys.gemini) {
-    // transcribeGemini always tries the dedicated GEMINI_TRANSCRIBE_MODEL first
-    // (falling back to CURRENT_GEMINI_DEFAULT only on a 404/429 cooldown); `m`
-    // here is just what error messages/`stt.models` report, resolved the same
-    // way the chat path picks a model.
     const model = resolveGeminiModel(settings);
-    chain.push({ p: 'gemini', m: model, fn: (wav) => transcribeGemini(keys.gemini, wav) });
+    const transcribeModel = settings.geminiSttModel || GEMINI_TRANSCRIBE_MODEL;
+    chain.push({ p: 'gemini', m: model, fn: (wav) => transcribeGemini(keys.gemini, wav, transcribeModel) });
   }
   // Custom (OpenAI-compatible) endpoint: same shape as the Groq branch above,
   // just pointed at the user's own Base URL. Deliberately NOT part of 'auto' —

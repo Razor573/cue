@@ -1688,6 +1688,7 @@
     fillSettings();
     scrim.classList.remove('hidden');
     refreshWhisperModels();
+    void refreshGeminiSttModels();
     updateUnlockBanner();
   }
   // Only hide after a successful save. A second closeSettings used to shadow
@@ -2125,6 +2126,61 @@
   $('#publik-byo').addEventListener('click', selectByoProvider);
   cue.on('publik:state', (state) => { publikState = state; renderPublikBlock(); maybeShowLowStarter(state); });
 
+  const GEMINI_STT_FALLBACK_MODELS = [
+    { id: 'gemini-3.5-transcribe', label: 'Gemini 3.5 Transcribe (Default transcription engine)' },
+    { id: 'gemini-3.5-transcribe-live', label: 'Gemini 3.5 Transcribe Live (Streaming low-latency)' },
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Multimodal audio transcription)' },
+    { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash (Multimodal audio transcription)' },
+    { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Fast audio transcription)' },
+    { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite (Ultralight transcription)' },
+    { id: 'gemini-4-argon', label: 'Gemini 4 Argon (High-precision transcription)' }
+  ];
+
+  function updateGeminiSttRowVisibility() {
+    const row = $('#gemini-stt-row');
+    if (!row) return;
+    const provider = settings.sttProvider || 'auto';
+    row.classList.toggle('hidden', provider !== 'gemini' && provider !== 'auto');
+  }
+
+  function populateGeminiSttModels(models, selectedVal) {
+    const select = $('#gemini-stt-model-select');
+    if (!select) return;
+    select.innerHTML = '';
+    const list = Array.isArray(models) && models.length ? models : GEMINI_STT_FALLBACK_MODELS;
+    const current = selectedVal || settings.geminiSttModel || 'gemini-3.5-transcribe';
+    for (const item of list) {
+      const opt = document.createElement('option');
+      opt.value = item.id;
+      opt.textContent = item.label || item.id;
+      if (item.id === current) opt.selected = true;
+      select.appendChild(opt);
+    }
+    if (select.value) {
+      settings.geminiSttModel = select.value;
+    }
+  }
+
+  async function refreshGeminiSttModels() {
+    const refreshBtn = $('#refresh-gemini-stt-btn');
+    if (refreshBtn) refreshBtn.disabled = true;
+    try {
+      if (cue.listGeminiSTTModels) {
+        const apiKey = ($('#key-gemini') && $('#key-gemini').value.trim()) || (settings.apiKeys && settings.apiKeys.gemini) || '';
+        const res = await cue.listGeminiSTTModels({ apiKey });
+        if (res && res.models) {
+          populateGeminiSttModels(res.models, settings.geminiSttModel);
+        }
+      } else {
+        populateGeminiSttModels(GEMINI_STT_FALLBACK_MODELS, settings.geminiSttModel);
+      }
+    } catch (_) {
+      populateGeminiSttModels(GEMINI_STT_FALLBACK_MODELS, settings.geminiSttModel);
+    } finally {
+      if (refreshBtn) refreshBtn.disabled = false;
+    }
+  }
+
   function fillSettings() {
     // Keys tab
     document.querySelectorAll('#provider-seg button').forEach((b) => b.classList.toggle('on', b.dataset.provider === settings.provider));
@@ -2178,6 +2234,8 @@
     document.querySelectorAll('#stt-provider-seg button').forEach((button) => {
       button.classList.toggle('on', button.dataset.sttProvider === (settings.sttProvider || 'auto'));
     });
+    populateGeminiSttModels(GEMINI_STT_FALLBACK_MODELS, settings.geminiSttModel);
+    updateGeminiSttRowVisibility();
     const localWhisper = settings.localWhisper || { modelId: 'base.en', language: 'auto', threads: 0 };
     $('#whisper-language').value = localWhisper.language || 'auto';
     $('#whisper-threads').value = Number(localWhisper.threads) || 0;
@@ -2272,8 +2330,23 @@
     document.querySelectorAll('#stt-provider-seg button').forEach((candidate) => {
       candidate.classList.toggle('on', candidate === button);
     });
+    updateGeminiSttRowVisibility();
     $('#s-status').textContent = statusText();
   }));
+
+  const geminiSttSelect = $('#gemini-stt-model-select');
+  if (geminiSttSelect) {
+    geminiSttSelect.addEventListener('change', () => {
+      settings.geminiSttModel = geminiSttSelect.value;
+      void saveSettings();
+    });
+  }
+  const refreshGeminiSttBtn = $('#refresh-gemini-stt-btn');
+  if (refreshGeminiSttBtn) {
+    refreshGeminiSttBtn.addEventListener('click', () => {
+      void refreshGeminiSttModels();
+    });
+  }
 
   function formatBytes(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
@@ -2460,6 +2533,7 @@
     settings.apiKeys.custom = $('#key-custom').value.trim();
     settings.baseUrl = $('#base-url').value.trim();
     settings.apiKeys.gemini = $('#key-gemini').value.trim();
+    if ($('#gemini-stt-model-select')) settings.geminiSttModel = $('#gemini-stt-model-select').value;
     settings.apiKeys.deepgram = $('#key-deepgram').value.trim();
     settings.apiKeys.ollama = $('#key-ollama').value.trim();
     settings.apiKeys.minimax = $('#key-minimax').value.trim();

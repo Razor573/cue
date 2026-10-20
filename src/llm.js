@@ -27,6 +27,53 @@ const GEMINI_TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
 // interim hypotheses plus a final on each pause. Used by GeminiLiveSTT in
 // stt-streaming.js; the batch model above is the fallback when it fails.
 const GEMINI_TRANSCRIBE_LIVE_MODEL = 'gemini-3.5-transcribe-live';
+const GEMINI_STT_MODELS = [
+  { id: 'gemini-3.5-transcribe', label: 'Gemini 3.5 Transcribe (Default transcription engine)' },
+  { id: 'gemini-3.5-transcribe-live', label: 'Gemini 3.5 Transcribe Live (Streaming low-latency)' },
+  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Multimodal audio transcription)' },
+  { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash (Multimodal audio transcription)' },
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Fast audio transcription)' },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite (Ultralight transcription)' },
+  { id: 'gemini-4-argon', label: 'Gemini 4 Argon (High-precision transcription)' }
+];
+
+async function listGeminiSTTModels(apiKey, fetchImpl = fetch) {
+  const curated = GEMINI_STT_MODELS.map((m) => ({ ...m }));
+  const byId = new Map();
+  for (const item of curated) {
+    byId.set(item.id, item);
+  }
+  let live = false;
+  let warning = '';
+  if (apiKey && String(apiKey).trim()) {
+    try {
+      const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(String(apiKey).trim())}`);
+      if (res.ok) {
+        const data = await res.json();
+        const apiModels = (data.models || [])
+          .map((m) => String(m.name || '').replace(/^models\//, '').trim())
+          .filter((id) => /^gemini-[34]/i.test(id) && !DEAD_GEMINI_MODEL_RE.test(id))
+          .filter((id) => /transcribe|audio|flash|argon/i.test(id) && !/embedding|imagen|veo|tts/i.test(id));
+        for (const id of apiModels) {
+          if (!byId.has(id)) {
+            byId.set(id, { id, label: id });
+          }
+        }
+        live = true;
+      } else {
+        warning = `Gemini models HTTP ${res.status}`;
+      }
+    } catch (err) {
+      warning = (err && err.message) || String(err);
+    }
+  }
+  return {
+    ok: true,
+    models: Array.from(byId.values()),
+    live,
+    ...(warning ? { warning } : {})
+  };
+}
 // claude-3-5-haiku-latest / claude-3-5-sonnet-latest were retired by Anthropic
 // (confirmed absent from GET https://api.anthropic.com/v1/models as of Sep 19
 // 2026 — every claude-2.x and claude-3.x id 404s with not_found_error).
@@ -404,7 +451,7 @@ function stripDataUrl(dataUrl) {
   return m ? { mime: m[1], b64: m[2] } : null;
 }
 
-async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, onResponse }) {
+async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, onResponse, onThought }) {
   const OpenAI = require('openai');
   const client = new OpenAI(baseURL ? { apiKey, baseURL } : { apiKey });
   const messages = [{ role: 'system', content: system }];
@@ -434,8 +481,18 @@ async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUr
   }
   let full = '';
   for await (const part of stream) {
-    const d = part.choices && part.choices[0] && part.choices[0].delta && part.choices[0].delta.content;
-    if (d) { full += d; onToken(d); }
+    const delta = part.choices && part.choices[0] && part.choices[0].delta;
+    if (delta) {
+      if (delta.reasoning_content) {
+        if (typeof onThought === 'function') onThought(delta.reasoning_content);
+      } else if (delta.reasoning) {
+        if (typeof onThought === 'function') onThought(delta.reasoning);
+      }
+      if (delta.content) {
+        full += delta.content;
+        onToken(delta.content);
+      }
+    }
   }
   return full;
 }
@@ -490,7 +547,7 @@ async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxToke
   return full;
 }
 
-async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onThought }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey });
   const messages = turns.map((t, i) => {
@@ -507,7 +564,14 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
   const stream = await client.messages.create({ model, max_tokens: maxTokens, system, messages, stream: true });
   let full = '';
   for await (const ev of stream) {
-    if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { full += ev.delta.text; onToken(ev.delta.text); }
+    if (ev.type === 'content_block_delta' && ev.delta) {
+      if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
+        if (typeof onThought === 'function') onThought(ev.delta.thinking);
+      } else if (ev.delta.type === 'text_delta' && ev.delta.text) {
+        full += ev.delta.text;
+        onToken(ev.delta.text);
+      }
+    }
   }
   return full;
 }
@@ -522,18 +586,23 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
 // (thinkingBudget: 0 is rejected by pro models and "minimal" by flash, so
 // "low" is the one setting that works across the family.)
 const GEMINI_THINKING_HEADROOM = { fast: 1024, smart: 4096 };
-function geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch = false, includeThoughts = false }) {
+function geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch = false, includeThoughts = false, model = '' }) {
   const config = {
     systemInstruction: system,
     maxOutputTokens: maxTokens + (thinking ? GEMINI_THINKING_HEADROOM.smart : GEMINI_THINKING_HEADROOM.fast)
   };
+  const cleanModel = String(model || '').trim();
+  const isGemini3or4 = cleanModel ? /^gemini-[34]/i.test(cleanModel) : true;
+  const lvl = String(thinkingLevel || (thinking ? 'medium' : 'low')).toLowerCase();
+
   if (includeThoughts) {
-    config.thinkingConfig = {
-      thinkingLevel: thinkingLevel ? String(thinkingLevel).toLowerCase() : (thinking ? 'medium' : 'low'),
-      includeThoughts: true
-    };
+    config.thinkingConfig = isGemini3or4
+      ? { thinkingLevel: lvl, includeThoughts: true }
+      : { includeThoughts: true, thinkingBudget: -1 };
   } else if (thinkingLevel) {
-    config.thinkingConfig = { thinkingLevel: String(thinkingLevel).toLowerCase() };
+    config.thinkingConfig = isGemini3or4
+      ? { thinkingLevel: lvl }
+      : { thinkingBudget: -1 };
   } else if (!thinking) {
     config.thinkingConfig = { thinkingLevel: 'low' };
   }
@@ -555,16 +624,20 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
     }
     return { role: t.role === 'assistant' ? 'model' : 'user', parts };
   });
-  const config = geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch, includeThoughts: true });
+  const config = geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch, includeThoughts: true, model });
   let stream;
   try {
     stream = await ai.models.generateContentStream({ model, contents, config });
   } catch (e) {
-    // A model that predates thinkingLevel (or a custom id that rejects it)
-    // should still answer: retry once without the thinking setting.
     if (!config.thinkingConfig || !/thinking/i.test((e && e.message) || '')) throw e;
-    delete config.thinkingConfig;
-    stream = await ai.models.generateContentStream({ model, contents, config });
+    try {
+      config.thinkingConfig = { includeThoughts: true, thinkingBudget: -1 };
+      stream = await ai.models.generateContentStream({ model, contents, config });
+    } catch (e2) {
+      if (!/thinking/i.test((e2 && e2.message) || '')) throw e2;
+      delete config.thinkingConfig;
+      stream = await ai.models.generateContentStream({ model, contents, config });
+    }
   }
   let full = '';
   for await (const chunk of stream) {
@@ -794,7 +867,7 @@ function createLLM(settings, fetchImpl = fetch) {
         if (provider === 'anthropic') return await streamAnthropic(args);
         if (provider === 'gemini') return await streamGemini({
           ...args,
-          thinkingLevel: settings.geminiThinkingLevel || 'LOW',
+          thinkingLevel: settings.geminiThinkingLevel || 'MEDIUM',
           webSearch: !!settings.geminiWebSearch,
           onThought: args.onThought
         });
@@ -1076,5 +1149,7 @@ module.exports = {
   PROVIDER_MODEL_CATALOG,
   listProviderModels,
   testProviderConnection,
-  isRateLimitError
+  isRateLimitError,
+  GEMINI_STT_MODELS,
+  listGeminiSTTModels
 };

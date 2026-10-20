@@ -348,6 +348,17 @@
         </div>
         <div class="s-note">Local mode keeps microphone and meeting audio on this computer. It never silently falls back to a cloud transcription provider. Custom sends audio to the Base URL and Custom key set on the API Keys tab (requires both).</div>
 
+        <div id="gemini-stt-row" class="s-field">
+          <div class="section-head-with-action" style="width:100%;">
+            <label class="s-label" for="gemini-stt-model-select" style="margin:0;">Gemini transcription model</label>
+            <button type="button" class="btn-ghost btn-xs" id="refresh-gemini-stt-btn">Refresh</button>
+          </div>
+          <div class="s-input-group" style="width:100%;">
+            <select class="s-select" id="gemini-stt-model-select" style="width:100%;"></select>
+          </div>
+          <div class="s-note">Choose which Gemini speech-to-text model transcribes live microphone and meeting audio.</div>
+        </div>
+
         <label class="s-label">Meeting audio <span class="s-hint">transcribe the other side of a call</span></label>
         <div class="s-seg" id="meeting-audio-seg">
           <button data-meeting-audio="off">Off</button>

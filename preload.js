@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('cue', {
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsSet: (patch) => ipcRenderer.invoke('settings:set', patch),
   listModels: (params) => ipcRenderer.invoke('models:list', params),
+  listGeminiSTTModels: (params) => ipcRenderer.invoke('stt:gemini-models', params),
   testConnection: (params) => ipcRenderer.invoke('llm:test-connection', params),
   parseVertexServiceAccount: (raw) => ipcRenderer.invoke('vertex:parse-sa', raw),
   whisperModels: () => ipcRenderer.invoke('whisper:models'),
