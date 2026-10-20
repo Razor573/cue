@@ -113,6 +113,26 @@ const MODES = {
     }
   },
 
+  // ── Look: screenshot & immediate guidance ─────────────────────────────────
+  look: {
+    needsScreen: true,
+    userBubble: 'Look at screen',
+    small: false,
+    resumeMode: 'assist',
+    buildSystem(contextBlock, aiRules) {
+      return applyRules(buildSystem(
+        'You are cue, a discreet real-time copilot looking at the user\'s screen. ' +
+        BASE_RULES +
+        'Analyze what is on the screen and provide immediate, relevant answers, solutions, or explanations. Be concise and direct with no preamble.',
+        contextBlock
+      ), aiRules, 'look');
+    },
+    build(ctx) {
+      const t = formatTranscript(ctx ? ctx.transcript : [], 12);
+      return (t ? 'Recent conversation:\n' + t + '\n\n' : '') + ((ctx && ctx.userText) ? ctx.userText : 'Look at what is on the screen and provide immediate assistance.');
+    }
+  },
+
   // ── Ask: free-form question ────────────────────────────────────────────────
   ask: {
     needsScreen: true,

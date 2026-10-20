@@ -37,6 +37,10 @@
       </div>
       <div class="tb-divider"></div>
       <button class="tb-quit" id="quit-btn" title="Quit cue" aria-label="Quit cue"></button>
+      <div class="tb-divider"></div>
+      <div id="interactive-pill" class="interactive-pill locked" title="Click-through status (Ctrl+Shift+, to toggle)">
+        <span class="pill-lock-icon">🔒</span><span class="pill-text">Pass-through</span>
+      </div>
     </div>
 
     <!-- Main assistant panel -->
@@ -69,6 +73,11 @@
             </div>
 
             <div id="composer">
+              <div id="stealth-typing-badge" class="stealth-typing-badge hidden">
+                <span class="stealth-dot"></span>
+                <span>Stealth typing active · Keys swallowed from OS</span>
+              </div>
+              <div id="attached-files-bar" class="attached-files-bar hidden"></div>
               <div id="input-area">
                 <div id="placeholder">Ask about your screen or conversation, or <span class="keycap">⌘</span><span class="keycap">⇧</span><span class="keycap">⏎</span> for Smart assist</div>
                 <textarea id="input" rows="1" spellcheck="false"></textarea>
@@ -110,6 +119,11 @@
         <button id="s-close" class="s-close">Done</button>
       </div>
 
+      <div id="settings-unlock-banner" class="settings-unlock-banner">
+        <span class="unlock-icon">🔒</span>
+        <span class="unlock-text">Pass-through clicking is active. Press <span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">,</span> to unlock clicking.</span>
+      </div>
+
       <!-- Tab bar -->
       <div class="s-tabs">
         <button class="s-tab on" data-tab="keys">🔑 API Keys</button>
@@ -117,6 +131,7 @@
         <button class="s-tab" data-tab="transcription">🔉 Audio</button>
         <button class="s-tab" data-tab="style">✨ Style</button>
         <button class="s-tab" data-tab="appearance">🌗 Appearance</button>
+        <button class="s-tab" data-tab="hotkeys">⌨️ Hotkeys</button>
       </div>
 
       <!-- Tab: Keys -->
@@ -373,6 +388,100 @@
         <div class="s-opacity-row">
           <input type="range" id="s-opacity-slider" min="20" max="100" step="1" value="100" />
           <span id="s-opacity-value">100%</span>
+        </div>
+      </div>
+
+      <!-- Tab: Hotkeys -->
+      <div class="s-body s-tab-pane hidden" data-pane="hotkeys">
+        <label class="s-label">Keyboard Shortcuts <span class="s-hint">all shortcuts work globally across all applications</span></label>
+        <div class="hotkeys-grid">
+          <div class="hotkey-group">
+            <div class="hotkey-group-title">Primary Copilot Actions</div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Look at screen &amp; immediate answer</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Enter</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Smart assist (screen + live transcript)</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">Enter</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Toggle ask composer with stealth typing</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">K</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Reset view, cancel generation &amp; queues</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">R</span></span>
+            </div>
+          </div>
+
+          <div class="hotkey-group">
+            <div class="hotkey-group-title">Pass-Through &amp; Interactivity</div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Open Settings (pass-through mode)</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">,</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Unlock / Lock interactive clicking</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">,</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Toggle overlay visibility</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">\</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Emergency recovery (restore &amp; show overlay)</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">R</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Quit cue application</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Q</span></span>
+            </div>
+          </div>
+
+          <div class="hotkey-group">
+            <div class="hotkey-group-title">Navigation &amp; Scrolling</div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Scroll AI response up / down</span>
+              <span class="hotkey-keys"><span class="keycap">Alt</span><span class="keycap">↑</span> / <span class="keycap">↓</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Scroll code blocks horizontally</span>
+              <span class="hotkey-keys"><span class="keycap">Alt</span><span class="keycap">←</span> / <span class="keycap">→</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Previous / Next response turn</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">↑</span> / <span class="keycap">↓</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Move overlay position (50px steps)</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Arrows</span></span>
+            </div>
+          </div>
+
+          <div class="hotkey-group">
+            <div class="hotkey-group-title">Appearance &amp; Context</div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Increase / decrease overlay opacity</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">]</span> / <span class="keycap">[</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Toggle ultra-transparency mode</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">V</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Attach context files (PDF, DOCX, Code)</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">O</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Remove last attached context file</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">O</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Toggle live meeting &amp; microphone listening</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">L</span></span>
+            </div>
+          </div>
         </div>
       </div>
 

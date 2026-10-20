@@ -23,6 +23,14 @@ contextBridge.exposeInMainWorld('cue', {
   micPcm: (arrayBuffer) => ipcRenderer.send('mic:pcm', arrayBuffer),
   systemPcm: (arrayBuffer) => ipcRenderer.send('system:pcm', arrayBuffer),
   setIgnoreMouse: (v) => ipcRenderer.send('mouse:ignore', v),
+  enableSafeClickThrough: () => ipcRenderer.invoke('mouse:click-through-enable'),
+  restoreInteractiveMode: () => ipcRenderer.invoke('mouse:interactive-restore'),
+  toggleInteractiveMode: () => ipcRenderer.invoke('mouse:interactive-toggle'),
+  startStealthTyping: () => ipcRenderer.invoke('stealth:start'),
+  stopStealthTyping: () => ipcRenderer.invoke('stealth:stop'),
+  attachFiles: () => ipcRenderer.invoke('files:attach-dialog'),
+  removeLastAttachedFile: () => ipcRenderer.invoke('files:remove-last'),
+  checkUpdate: () => ipcRenderer.invoke('app:update-check'),
   windowDragStart: () => ipcRenderer.send('window:drag-start'),
   windowDragEnd: () => ipcRenderer.send('window:drag-end'),
   clearTranscript: () => ipcRenderer.invoke('transcript:clear'),
@@ -47,7 +55,15 @@ contextBridge.exposeInMainWorld('cue', {
   permissionsContinue: () => ipcRenderer.send('permissions:continue'),
   log: (msg) => ipcRenderer.send('log', msg),
   on: (channel, cb) => {
-    const allowed = ['capture:state', 'llm:start', 'llm:token', 'llm:done', 'llm:error', 'status', 'transcript', 'transcript:restore', 'stt:interim', 'stt:final', 'stt:status', 'vad:state', 'applink:consent-request', 'hide:toggle', 'whisper:download-progress', 'whisper:models-changed', 'publik:state', 'slides:update'];
+    const allowed = [
+      'capture:state', 'llm:start', 'llm:token', 'llm:done', 'llm:error', 'status',
+      'transcript', 'transcript:restore', 'stt:interim', 'stt:final', 'stt:status',
+      'vad:state', 'applink:consent-request', 'hide:toggle', 'whisper:download-progress',
+      'whisper:models-changed', 'publik:state', 'slides:update',
+      'stealth-key', 'toggle-ask-input', 'open-settings', 'settings-unlock',
+      'reset-view', 'response:scroll', 'code:scroll', 'history:nav',
+      'transparency:toggle', 'interactive:state', 'attached-files', 'emergency:recover'
+    ];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, data) => cb(data));
   }

@@ -1321,6 +1321,7 @@
     fillSettings();
     scrim.classList.remove('hidden');
     refreshWhisperModels();
+    updateUnlockBanner();
   }
   // Only hide after a successful save. A second closeSettings used to shadow
   // this one and always dismiss the modal, so validation errors (and any
@@ -1332,6 +1333,7 @@
     closingSettings = true;
     try {
       if (await saveSettings()) scrim.classList.add('hidden');
+      if (cue && cue.enableSafeClickThrough) void cue.enableSafeClickThrough();
     } finally {
       closingSettings = false;
     }
@@ -2349,6 +2351,159 @@
   $('#ob-back').addEventListener('click', () => { if (obIndex > 0) { obIndex--; renderOnboard(); } });
   $('#ob-skip').addEventListener('click', finishOnboard);
   $('#logo-btn').addEventListener('click', showOnboard);
+
+  // ---- Phantom Lens pass-through, stealth typing & shortcuts -------------
+  let isInteractive = false;
+  let stealthTypingActive = false;
+
+  function updateUnlockBanner() {
+    const banner = $('#settings-unlock-banner');
+    if (banner) {
+      banner.classList.toggle('hidden', isInteractive);
+    }
+  }
+
+  function updateInteractivePill(interactive) {
+    isInteractive = !!interactive;
+    const pill = $('#interactive-pill');
+    if (!pill) return;
+    pill.classList.toggle('locked', !isInteractive);
+    pill.classList.toggle('unlocked', isInteractive);
+    const lockIcon = pill.querySelector('.pill-lock-icon');
+    const text = pill.querySelector('.pill-text');
+    if (isInteractive) {
+      if (lockIcon) lockIcon.textContent = '🔓';
+      if (text) text.textContent = 'Interactive';
+      pill.title = 'Interactive mode enabled (Ctrl+Shift+, to lock pass-through)';
+    } else {
+      if (lockIcon) lockIcon.textContent = '🔒';
+      if (text) text.textContent = 'Pass-through';
+      pill.title = 'Pass-through mode active (Ctrl+Shift+, to unlock clicking)';
+    }
+    updateUnlockBanner();
+  }
+
+  const interactivePill = $('#interactive-pill');
+  if (interactivePill) {
+    interactivePill.addEventListener('click', async () => {
+      if (cue && cue.toggleInteractiveMode) {
+        const nextState = await cue.toggleInteractiveMode();
+        updateInteractivePill(nextState);
+      }
+    });
+  }
+
+  function renderAttachedFiles(files) {
+    const bar = $('#attached-files-bar');
+    if (!bar) return;
+    if (!files || !files.length) {
+      bar.innerHTML = '';
+      bar.classList.add('hidden');
+      return;
+    }
+    bar.classList.remove('hidden');
+    bar.innerHTML = files.map((f) => `<div class="file-chip" title="${f.path}">📄 ${f.name}</div>`).join('');
+  }
+
+  cue.on('interactive:state', ({ interactive }) => {
+    updateInteractivePill(interactive);
+  });
+
+  cue.on('toggle-ask-input', async () => {
+    const badge = $('#stealth-typing-badge');
+    if (!stealthTypingActive) {
+      stealthTypingActive = true;
+      if (badge) badge.classList.remove('hidden');
+      input.focus();
+      if (cue && cue.startStealthTyping) await cue.startStealthTyping();
+    } else {
+      stealthTypingActive = false;
+      if (badge) badge.classList.add('hidden');
+      input.blur();
+      if (cue && cue.stopStealthTyping) await cue.stopStealthTyping();
+    }
+  });
+
+  cue.on('stealth-key', (ev) => {
+    if (!ev) return;
+    if (ev.kind === 'char' && typeof ev.char === 'string') {
+      input.value += ev.char;
+      syncPlaceholder();
+      updateSendButtonState();
+    } else if (ev.kind === 'backspace') {
+      input.value = input.value.slice(0, -1);
+      syncPlaceholder();
+      updateSendButtonState();
+    } else if (ev.kind === 'enter') {
+      send();
+    } else if (ev.kind === 'escape') {
+      input.value = '';
+      syncPlaceholder();
+      updateSendButtonState();
+      stealthTypingActive = false;
+      const badge = $('#stealth-typing-badge');
+      if (badge) badge.classList.add('hidden');
+      if (cue && cue.stopStealthTyping) void cue.stopStealthTyping();
+    }
+  });
+
+  cue.on('open-settings', () => {
+    openSettings();
+  });
+
+  cue.on('settings-unlock', ({ interactive }) => {
+    updateInteractivePill(interactive);
+  });
+
+  cue.on('reset-view', () => {
+    clearMessages();
+    input.value = '';
+    syncPlaceholder();
+    updateSendButtonState();
+    setBusy(false);
+    if (stealthTypingActive) {
+      stealthTypingActive = false;
+      const badge = $('#stealth-typing-badge');
+      if (badge) badge.classList.add('hidden');
+      if (cue && cue.stopStealthTyping) void cue.stopStealthTyping();
+    }
+  });
+
+  cue.on('response:scroll', ({ delta }) => {
+    const m = $('#messages');
+    if (m) m.scrollBy({ top: delta || 0, behavior: 'smooth' });
+  });
+
+  cue.on('code:scroll', ({ delta }) => {
+    const codes = document.querySelectorAll('#messages pre');
+    if (codes.length) {
+      codes[codes.length - 1].scrollBy({ left: delta || 0, behavior: 'smooth' });
+    }
+  });
+
+  cue.on('history:nav', ({ direction }) => {
+    const sidebar = document.getElementById('transcript-sidebar');
+    if (sidebar && !sidebar.classList.contains('open')) {
+      toggleTranscriptSidebar();
+    } else {
+      const m = $('#messages');
+      if (m) m.scrollBy({ top: direction === 'prev' ? -200 : 200, behavior: 'smooth' });
+    }
+  });
+
+  cue.on('transparency:toggle', () => {
+    $('#app').classList.toggle('ultra-transparent');
+  });
+
+  cue.on('attached-files', (files) => {
+    renderAttachedFiles(files);
+  });
+
+  cue.on('emergency:recover', () => {
+    $('#app').classList.remove('ultra-transparent');
+    $('#app').style.opacity = '1';
+    updateInteractivePill(false);
+  });
 
   // ---- boot --------------------------------------------------------------
   (async function boot() {

@@ -49,8 +49,25 @@ const { WhisperModelManager } = require('./src/whisper-model-manager');
 const { requireWhisperModel } = require('./src/whisper-model-catalog');
 const { locateWhisperRuntime } = require('./src/whisper-runtime');
 const { LocalWhisperTranscriber } = require('./src/local-whisper-transcriber');
+const { StealthKeyboardManager } = require('./src/stealth-keyboard');
 
 let win = null;
+let interactiveOverride = false;
+let attachedFiles = [];
+const stealthKeyboard = new StealthKeyboardManager(() => win);
+
+function applyInteractivityState() {
+  if (!win || win.isDestroyed()) return;
+  if (interactiveOverride) {
+    win.setIgnoreMouseEvents(false);
+    try { win.setFocusable(true); } catch (_) {}
+    send('interactive:state', { interactive: true });
+  } else {
+    win.setIgnoreMouseEvents(true, { forward: true });
+    try { win.setFocusable(false); } catch (_) {}
+    send('interactive:state', { interactive: false });
+  }
+}
 // Which global shortcuts cue actually holds. `globalShortcut.register` returns
 // false when another application already owns the combination, and nothing used
 // to look at that — so the only symptom was a key that did nothing. Iris reads
@@ -348,6 +365,7 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     win.showInactive();
+    applyInteractivityState();
     win.setTitle('Microsoft Edge Update');
     if (restoredTurns.length) {
       // A meeting was in progress when cue last exited: put its transcript back
@@ -1073,7 +1091,7 @@ ipcMain.on('publik:open', (_e, url) => {
   if (!target) { recordEvent({ level: 'warn', event: 'publik_open_dropped', msg: '', frame: 'publik:open', context: {} }); return; }
   shell.openExternal(target).catch(() => {});
 });
-ipcMain.handle('capture:toggle', () => {
+function toggleCapture() {
   const targetState = !desiredCaptureState;
   desiredCaptureState = targetState;
   if (!targetState && !state.capturing && localWhisperTranscriber) {
@@ -1083,7 +1101,8 @@ ipcMain.handle('capture:toggle', () => {
     .catch(() => state.capturing)
     .then(() => setCapturing(targetState));
   return captureTransition;
-});
+}
+ipcMain.handle('capture:toggle', () => toggleCapture());
 ipcMain.handle('capture:state', () => ({ active: state.capturing }));
 ipcMain.handle('whisper:models', () => getWhisperOverview());
 ipcMain.handle('whisper:model-download', async (_event, modelId) => {
@@ -1148,7 +1167,137 @@ ipcMain.handle('slides:clear', () => {
 ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text));
 ipcMain.on('mic:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('you', arrayBuffer); });
 ipcMain.on('system:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('them', arrayBuffer); });
-ipcMain.on('mouse:ignore', (_e, v) => { if (win) win.setIgnoreMouseEvents(!!v, { forward: true }); });
+ipcMain.handle('mouse:click-through-enable', () => {
+  interactiveOverride = false;
+  applyInteractivityState();
+  return true;
+});
+
+ipcMain.handle('mouse:interactive-restore', () => {
+  interactiveOverride = true;
+  applyInteractivityState();
+  return true;
+});
+
+ipcMain.handle('mouse:interactive-toggle', () => {
+  interactiveOverride = !interactiveOverride;
+  applyInteractivityState();
+  return interactiveOverride;
+});
+
+ipcMain.on('mouse:ignore', (_e, v) => {
+  if (!win || win.isDestroyed()) return;
+  if (interactiveOverride) {
+    win.setIgnoreMouseEvents(!!v, { forward: true });
+  } else {
+    win.setIgnoreMouseEvents(true, { forward: true });
+  }
+});
+
+ipcMain.handle('stealth:start', () => {
+  if (!stealthKeyboard) return { success: false, error: 'Stealth keyboard not initialized' };
+  const ok = stealthKeyboard.start();
+  return { success: ok, stealth: true, error: stealthKeyboard.getLastError() };
+});
+
+ipcMain.handle('stealth:stop', () => {
+  if (!stealthKeyboard) return { success: false };
+  const ok = stealthKeyboard.stop();
+  return { success: ok, error: stealthKeyboard.getLastError() };
+});
+
+ipcMain.handle('files:attach-dialog', async () => {
+  return await attachFileDialog();
+});
+
+ipcMain.handle('files:remove-last', () => {
+  return removeLastAttachedFile();
+});
+
+ipcMain.handle('app:update-check', async () => {
+  send('status', { message: 'Checking for updates...' });
+  return { updateAvailable: false, currentVersion: app.getVersion() };
+});
+
+// Window movement, opacity, attached files and recovery helpers
+function moveWindow(dx, dy) {
+  if (!win || win.isDestroyed()) return;
+  const [x, y] = win.getPosition();
+  const [w, h] = win.getSize();
+  const currentDisplay = screen.getDisplayNearestPoint({ x: x + Math.round(w / 2), y: y + Math.round(h / 2) });
+  const workArea = currentDisplay ? currentDisplay.workArea : screen.getPrimaryDisplay().workArea;
+
+  const newX = Math.round(Math.max(workArea.x - w + 100, Math.min(x + dx, workArea.x + workArea.width - 100)));
+  const newY = Math.round(Math.max(workArea.y, Math.min(y + dy, workArea.y + workArea.height - 40)));
+
+  win.setPosition(newX, newY);
+  saveWindowPosition();
+}
+
+function adjustOpacity(delta) {
+  if (!win || win.isDestroyed()) return;
+  const current = win.getOpacity();
+  const next = Math.max(0.1, Math.min(1.0, Math.round((current + delta) * 10) / 10));
+  win.setOpacity(next);
+  send('status', { message: `Overlay opacity: ${Math.round(next * 100)}%` });
+}
+
+function emergencyRecover() {
+  if (!win || win.isDestroyed()) return;
+  interactiveOverride = false;
+  applyInteractivityState();
+  win.setOpacity(1.0);
+  win.setAlwaysOnTop(true, 'screen-saver', 1);
+  const bounds = win.getBounds();
+  if (bounds.width < 100 || bounds.height < 100) {
+    const { workArea } = screen.getPrimaryDisplay();
+    win.setBounds({
+      x: Math.round(workArea.x + (workArea.width - (MAIN_W + 2 * SIDE_W)) / 2),
+      y: workArea.y + 6,
+      width: MAIN_W + 2 * SIDE_W,
+      height: 600
+    });
+  }
+  win.show();
+  send('emergency:recover', { ok: true });
+}
+
+async function attachFileDialog() {
+  if (!win || win.isDestroyed()) return attachedFiles;
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Attach files for context',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Documents & Code', extensions: ['pdf', 'docx', 'txt', 'md', 'js', 'ts', 'jsx', 'tsx', 'py', 'json', 'html', 'css', 'csv', 'png', 'jpg', 'jpeg'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  if (res.canceled || !res.filePaths.length) return attachedFiles;
+  for (const fp of res.filePaths) {
+    if (!attachedFiles.some(f => f.path === fp)) {
+      attachedFiles.push({ path: fp, name: path.basename(fp) });
+    }
+  }
+  send('attached-files', attachedFiles);
+  return attachedFiles;
+}
+
+function removeLastAttachedFile() {
+  if (attachedFiles.length > 0) {
+    attachedFiles.pop();
+    send('attached-files', attachedFiles);
+  }
+  return attachedFiles;
+}
+
+function toggleOverlayVisibility() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isVisible()) {
+    win.hide();
+  } else {
+    win.showInactive();
+  }
+}
 // Window dragging is done here rather than with CSS drag regions, which misbehave while the
 // renderer toggles click-through. The window follows the cursor until the renderer says stop.
 let windowDrag = null;
@@ -1223,11 +1372,81 @@ ipcMain.on('permissions:continue', async () => {
 
 // -------- shortcuts --------
 function registerShortcuts() {
+  // Primary Actions
   shortcutState.say = globalShortcut.register('CommandOrControl+Return', () => runFeature('say', ''));
-  shortcutState.assist = globalShortcut.register('CommandOrControl+Shift+Return', () => runFeature('assist', ''));
+  globalShortcut.register('CommandOrControl+Enter', () => runFeature('look', ''));
+  shortcutState.assist = globalShortcut.register('CommandOrControl+Shift+Enter', () => runFeature('assist', ''));
+  globalShortcut.register('CommandOrControl+Shift+Return', () => runFeature('assist', ''));
+  globalShortcut.register('CommandOrControl+Shift+L', () => toggleCapture());
+  globalShortcut.register('CommandOrControl+Shift+M', () => send('history:nav', { direction: 'prev' }));
+  globalShortcut.register('CommandOrControl+Shift+K', () => {
+    transcript.length = 0;
+    buffers.you = [];
+    buffers.them = [];
+    if (meetingMemory) meetingMemory.end().catch(() => {});
+    send('transcript:restore', { turns: [] });
+    send('status', { message: 'Conversation cleared.' });
+  });
+
+  // Phantom Lens Core Shortcuts
+  globalShortcut.register('CommandOrControl+K', () => send('toggle-ask-input', {}));
+  globalShortcut.register('CommandOrControl+R', () => {
+    state.busy = false;
+    send('reset-view', {});
+    send('status', { message: 'Reset and cancelled.' });
+  });
+  globalShortcut.register('CommandOrControl+,', () => send('open-settings', {}));
+  globalShortcut.register('CommandOrControl+Shift+,', () => {
+    interactiveOverride = !interactiveOverride;
+    applyInteractivityState();
+    send('settings-unlock', { interactive: interactiveOverride });
+  });
+  globalShortcut.register('CommandOrControl+\\', () => toggleOverlayVisibility());
+  globalShortcut.register('CommandOrControl+Shift+H', () => toggleOverlayVisibility());
+  globalShortcut.register('CommandOrControl+Shift+R', () => emergencyRecover());
+  shortcutState.quit = globalShortcut.register('CommandOrControl+Q', () => app.quit());
+  globalShortcut.register('CommandOrControl+Shift+X', () => app.quit());
+
+  // Scrolling shortcuts
+  globalShortcut.register('Alt+Up', () => send('response:scroll', { delta: -120 }));
+  globalShortcut.register('Alt+Down', () => send('response:scroll', { delta: 120 }));
+  globalShortcut.register('Alt+Left', () => send('code:scroll', { delta: -120 }));
+  globalShortcut.register('Alt+Right', () => send('code:scroll', { delta: 120 }));
+
+  // History navigation
+  globalShortcut.register('CommandOrControl+Shift+Up', () => send('history:nav', { direction: 'prev' }));
+  globalShortcut.register('CommandOrControl+Shift+Down', () => send('history:nav', { direction: 'next' }));
+
+  // Window movement (50px)
+  globalShortcut.register('CommandOrControl+Left', () => moveWindow(-50, 0));
+  globalShortcut.register('CommandOrControl+Right', () => moveWindow(50, 0));
+  globalShortcut.register('CommandOrControl+Up', () => moveWindow(0, -50));
+  globalShortcut.register('CommandOrControl+Down', () => moveWindow(0, 50));
+
+  // Opacity adjustments
+  globalShortcut.register('CommandOrControl+Shift+]', () => adjustOpacity(0.1));
+  globalShortcut.register('CommandOrControl+Shift+=', () => adjustOpacity(0.1));
+  globalShortcut.register('CommandOrControl+Shift+Plus', () => adjustOpacity(0.1));
+  globalShortcut.register('CommandOrControl+Shift+[', () => adjustOpacity(-0.1));
+  globalShortcut.register('CommandOrControl+Shift+-', () => adjustOpacity(-0.1));
+  globalShortcut.register('CommandOrControl+Shift+Minus', () => adjustOpacity(-0.1));
+
+  // Transparency mode
+  globalShortcut.register('CommandOrControl+Shift+V', () => send('transparency:toggle', {}));
+
+  // Attached context files
+  globalShortcut.register('CommandOrControl+O', () => attachFileDialog());
+  globalShortcut.register('CommandOrControl+Shift+O', () => removeLastAttachedFile());
+
+  // Update check
+  globalShortcut.register('CommandOrControl+Shift+U', () => {
+    send('status', { message: 'Checking for updates...' });
+  });
+
+  // Legacy LeetCode & Hide shortcuts kept
   shortcutState.leetcode = globalShortcut.register('CommandOrControl+H', () => runFeature('leetcode', ''));
   shortcutState.hide = globalShortcut.register('CommandOrControl+Shift+/', () => send('hide:toggle', {}));
-  shortcutState.quit = globalShortcut.register('CommandOrControl+Shift+X', () => app.quit());
+
   for (const [name, wasRegistered] of Object.entries(shortcutState)) {
     if (!wasRegistered) {
       recordEvent({ level: 'warn', event: 'shortcut_unavailable', msg: 'another application holds the ' + name + ' shortcut', frame: 'registerShortcuts', context: { shortcut: name } });

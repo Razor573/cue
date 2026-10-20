@@ -147,7 +147,7 @@ test('asks separately, and differently, for slide captions — never folded into
  */
 test('answers Iris over the link', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cue-applink-'));
-  const pathOptions = { homedir: home, env: { ...process.env, LOCALAPPDATA: path.join(home, 'Local') } };
+  const pathOptions = { homedir: home, env: { ...process.env, LOCALAPPDATA: path.join(home, 'Local') }, uid: path.basename(home) };
 
   let asked = 0;
   const link = new AppLinkServer({
