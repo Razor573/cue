@@ -51,6 +51,10 @@ const { locateWhisperRuntime } = require('./src/whisper-runtime');
 const { LocalWhisperTranscriber } = require('./src/local-whisper-transcriber');
 const { StealthKeyboardManager } = require('./src/stealth-keyboard');
 
+const isMac = process.platform === 'darwin';
+const isWindows = process.platform === 'win32';
+const isLinux = process.platform === 'linux';
+
 let win = null;
 let interactiveOverride = false;
 let attachedFiles = [];
@@ -58,6 +62,7 @@ const stealthKeyboard = new StealthKeyboardManager(() => win);
 
 function applyInteractivityState() {
   if (!win || win.isDestroyed()) return;
+  ensureContentProtection(win);
   if (interactiveOverride) {
     win.setIgnoreMouseEvents(false);
     try { win.setFocusable(true); } catch (_) {}
@@ -68,14 +73,22 @@ function applyInteractivityState() {
     send('interactive:state', { interactive: false });
   }
 }
+
+function ensureContentProtection(targetWin = win) {
+  if (!targetWin || targetWin.isDestroyed()) return;
+  if (process.env.CUE_NO_PROTECT) return;
+  if (isLinux) return;
+  try {
+    targetWin.setContentProtection(true);
+  } catch (err) {
+    console.warn('[cue] setContentProtection failed:', err);
+  }
+}
 // Which global shortcuts cue actually holds. `globalShortcut.register` returns
 // false when another application already owns the combination, and nothing used
 // to look at that — so the only symptom was a key that did nothing. Iris reads
 // this and can say which key is taken instead of guessing from a screenshot.
 const shortcutState = { assist: false, say: false, leetcode: false, quit: false };
-const isMac = process.platform === 'darwin';
-const isWindows = process.platform === 'win32';
-const isLinux = process.platform === 'linux';
 
 // -------- Windows version helpers --------
 // WDA_EXCLUDEFROMCAPTURE (setContentProtection) requires Windows 10 build 19041+.
@@ -87,29 +100,6 @@ function getWindowsBuild() {
 }
 const WIN_BUILD = getWindowsBuild();
 const WIN_SUPPORTS_CONTENT_PROTECTION = !isWindows || WIN_BUILD >= 19041;
-
-// WDA_EXCLUDEFROMCAPTURE (win.setContentProtection(true)) is documented to
-// exclude a window's content from third-party capture surfaces (BitBlt,
-// PrintWindow, DXGI Desktop Duplication, screen recording / screen share)
-// WITHOUT touching the live composited image on an ordinary, physically
-// scanned-out desktop session — the user still sees the window fine. But on
-// a Windows session whose own visible surface is ITSELF a remoted or
-// composited pipeline — a Remote Desktop (RDP) connection, a Windows 365 /
-// Cloud PC session, most VM consoles, a CI runner's virtual desktop — the
-// same flag has been observed to make the window render nothing at all, to
-// the user as much as to any capture tool (see
-// cue-windows-overlay-not-visible-for-mic-grant: PrintWindow(PW_RENDERFULLCONTENT)
-// sampled zero color variance, and a full-desktop screenshot showed the
-// always-on-top window occluding nothing, only ever reproduced with
-// protection on and never with it off). Windows sets the SESSIONNAME
-// environment variable to exactly "Console" for a locally-attached
-// interactive session; every remoted session gets a different value
-// (e.g. "RDP-Tcp#3"), and a non-interactive/service context has none at
-// all. Anything other than a confirmed local console session is treated as
-// unsafe to protect: a window the user can see (even if a screen-share
-// viewer also could) is strictly better than a window that is invisible to
-// everyone, including the user trying to grant it microphone access.
-const WIN_IS_LOCAL_CONSOLE_SESSION = !isWindows || process.env.SESSIONNAME === 'Console';
 
 let permWin = null;
 // Windows never blocks startup on an unresolved permission (see app.whenReady()
@@ -304,6 +294,7 @@ function createWindow() {
     acceptFirstMouse: true,
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     hasShadow: false,
     resizable: true,
     skipTaskbar: true,
@@ -326,30 +317,12 @@ function createWindow() {
 
   win = new BrowserWindow(winOptions);
 
-  // Fix 2: Only call setContentProtection if the OS supports it, and only on
-  // a session where it will not blank the window out for the user themself
-  // (see WIN_IS_LOCAL_CONSOLE_SESSION above — RDP/VM/Cloud-PC-style sessions
-  // render a WDA_EXCLUDEFROMCAPTURE window fully invisible, not just hidden
-  // from capture). On older builds, or a non-local-console Windows session,
-  // we skip it silently and send a warning to the renderer instead.
-  const shouldProtect = !process.env.CUE_NO_PROTECT && WIN_IS_LOCAL_CONSOLE_SESSION;
-  if (shouldProtect) {
-    if (isLinux) {
-      // setContentProtection has no effect on Linux (no windowing-system-level
-      // capture-exclusion primitive it can map to) — skip the no-op call and
-      // say so, rather than pretending the window is hidden from screen shares.
-      console.log('[cue] Running on Linux: native screen protection (setContentProtection) is not supported and has been skipped.');
-    } else if (WIN_SUPPORTS_CONTENT_PROTECTION) {
-      win.setContentProtection(true);
-    } else {
-      // Will notify the renderer after it loads
-      console.log(`[cue] Windows build ${WIN_BUILD} < 19041 — setContentProtection not supported. Window may appear in screen shares.`);
-    }
-  } else if (isWindows && !WIN_IS_LOCAL_CONSOLE_SESSION && !process.env.CUE_NO_PROTECT) {
-    console.log(`[cue] Windows session is not a local console session (SESSIONNAME=${process.env.SESSIONNAME}) — skipping setContentProtection so the window stays visible to you. Window may appear in screen shares.`);
+  ensureContentProtection(win);
+  if (isWindows && !WIN_SUPPORTS_CONTENT_PROTECTION) {
+    console.log(`[cue] Windows build ${WIN_BUILD} < 19041 — setContentProtection not supported. Window may appear in screen shares.`);
   }
 
-  win.setAlwaysOnTop(true, 'screen-saver', 1);
+  win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   if (isMac && typeof win.setHiddenInMissionControl === 'function') win.setHiddenInMissionControl(true);
 
@@ -365,6 +338,7 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     win.showInactive();
+    ensureContentProtection(win);
     applyInteractivityState();
     win.setTitle('Microsoft Edge Update');
     if (restoredTurns.length) {
@@ -377,18 +351,20 @@ function createWindow() {
       send('status', { message: `Resumed your meeting from ${ageMin} min ago (${turns.length} turns restored).` });
     }
     // Warn about missing content protection on old Windows builds
-    if (isWindows && shouldProtect && !WIN_SUPPORTS_CONTENT_PROTECTION) {
+    if (isWindows && !WIN_SUPPORTS_CONTENT_PROTECTION) {
       send('status', {
         message: `Heads up: your Windows version (build ${WIN_BUILD}) does not support screen-share hiding. Upgrade to Windows 10 build 19041+ or Windows 11 to enable invisibility in screen shares.`
       });
     }
-    // Warn when protection was skipped because this is not a local console
-    // session (RDP / Cloud PC / VM console) — see WIN_IS_LOCAL_CONSOLE_SESSION.
-    if (isWindows && !process.env.CUE_NO_PROTECT && !WIN_IS_LOCAL_CONSOLE_SESSION) {
-      send('status', {
-        message: 'Heads up: screen-share hiding is off for this session (remote desktop / cloud PC / VM sessions can render the window invisible to you as well when it is on). The window will be visible in screen shares here.'
-      });
-    }
+  });
+
+  win.on('show', () => {
+    ensureContentProtection(win);
+    applyInteractivityState();
+  });
+
+  win.on('focus', () => {
+    ensureContentProtection(win);
   });
   win.webContents.on('render-process-gone', (_e, d) => {
     console.log('[cue] renderer gone', JSON.stringify(d));
@@ -1292,7 +1268,8 @@ function emergencyRecover() {
   interactiveOverride = false;
   applyInteractivityState();
   win.setOpacity(1.0);
-  win.setAlwaysOnTop(true, 'screen-saver', 1);
+  win.setAlwaysOnTop(true, 'floating');
+  ensureContentProtection(win);
   const bounds = win.getBounds();
   if (bounds.width < 100 || bounds.height < 100) {
     const { workArea } = screen.getPrimaryDisplay();
@@ -1304,6 +1281,7 @@ function emergencyRecover() {
     });
   }
   win.show();
+  ensureContentProtection(win);
   send('emergency:recover', { ok: true });
 }
 
@@ -1341,6 +1319,7 @@ function toggleOverlayVisibility() {
     win.hide();
   } else {
     win.showInactive();
+    ensureContentProtection(win);
   }
 }
 // Window dragging is done here rather than with CSS drag regions, which misbehave while the
@@ -1581,6 +1560,7 @@ function createPermissionsWindow() {
     y: Math.round(workArea.y + (workArea.height - H) / 2),
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     hasShadow: true,
     resizable: false,
     skipTaskbar: false,
@@ -1592,8 +1572,13 @@ function createPermissionsWindow() {
       sandbox: false,
     }
   });
+  permWin.setAlwaysOnTop(true, 'floating');
+  ensureContentProtection(permWin);
   permWin.loadFile(path.join(__dirname, 'renderer', 'permissions.html'));
-  permWin.webContents.on('did-finish-load', () => permWin.show());
+  permWin.webContents.on('did-finish-load', () => {
+    permWin.show();
+    ensureContentProtection(permWin);
+  });
 }
 
 // -------- launch (called after permissions are confirmed) --------
