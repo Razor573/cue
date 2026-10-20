@@ -305,7 +305,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      backgroundThrottling: false
     }
   };
 
@@ -362,6 +363,14 @@ function createWindow() {
   win.on('show', () => {
     ensureContentProtection(win);
     applyInteractivityState();
+    registerAppShortcuts();
+  });
+
+  win.on('hide', () => {
+    if (stealthKeyboard && stealthKeyboard.isActive()) {
+      stealthKeyboard.stop();
+    }
+    unregisterAppShortcuts();
   });
 
   win.on('focus', () => {
@@ -1318,6 +1327,7 @@ function emergencyRecover() {
   }
   win.show();
   ensureContentProtection(win);
+  registerAppShortcuts();
   send('emergency:recover', { ok: true });
 }
 
@@ -1352,10 +1362,15 @@ function removeLastAttachedFile() {
 function toggleOverlayVisibility() {
   if (!win || win.isDestroyed()) return;
   if (win.isVisible()) {
+    if (stealthKeyboard && stealthKeyboard.isActive()) {
+      stealthKeyboard.stop();
+    }
     win.hide();
+    unregisterAppShortcuts();
   } else {
     win.showInactive();
     ensureContentProtection(win);
+    registerAppShortcuts();
   }
 }
 // Window dragging is done here rather than with CSS drag regions, which misbehave while the
@@ -1436,15 +1451,86 @@ function openMeetingWindow() {
 }
 
 // -------- shortcuts --------
-function registerShortcuts() {
+function isOverlayVisible() {
+  return Boolean(win && !win.isDestroyed() && win.isVisible());
+}
+
+let appShortcutsRegistered = false;
+
+const APP_SHORTCUT_KEYS = [
+  'CommandOrControl+Return',
+  'CommandOrControl+Enter',
+  'CommandOrControl+Shift+Enter',
+  'CommandOrControl+Shift+Return',
+  'CommandOrControl+Shift+L',
+  'CommandOrControl+Shift+M',
+  'CommandOrControl+Shift+K',
+  'CommandOrControl+K',
+  'CommandOrControl+R',
+  'CommandOrControl+,',
+  'CommandOrControl+Shift+,',
+  'CommandOrControl+Q',
+  'CommandOrControl+Shift+X',
+  'Alt+Up',
+  'Alt+Down',
+  'Alt+Left',
+  'Alt+Right',
+  'CommandOrControl+Shift+Up',
+  'CommandOrControl+Shift+Down',
+  'CommandOrControl+Left',
+  'CommandOrControl+Right',
+  'CommandOrControl+Up',
+  'CommandOrControl+Down',
+  'CommandOrControl+Shift+]',
+  'CommandOrControl+Shift+=',
+  'CommandOrControl+Shift+Plus',
+  'CommandOrControl+Shift+[',
+  'CommandOrControl+Shift+-',
+  'CommandOrControl+Shift+Minus',
+  'CommandOrControl+Shift+V',
+  'CommandOrControl+O',
+  'CommandOrControl+Shift+O',
+  'CommandOrControl+Shift+U',
+  'CommandOrControl+H',
+  'CommandOrControl+Shift+/'
+];
+
+function registerVisibilityShortcuts() {
+  globalShortcut.register('CommandOrControl+\\', () => toggleOverlayVisibility());
+  globalShortcut.register('CommandOrControl+Shift+H', () => toggleOverlayVisibility());
+  globalShortcut.register('CommandOrControl+Shift+R', () => emergencyRecover());
+}
+
+function registerAppShortcuts() {
+  if (appShortcutsRegistered) return;
+
   // Primary Actions
-  shortcutState.say = globalShortcut.register('CommandOrControl+Return', () => runFeature('say', ''));
-  globalShortcut.register('CommandOrControl+Enter', () => runFeature('look', ''));
-  shortcutState.assist = globalShortcut.register('CommandOrControl+Shift+Enter', () => runFeature('assist', ''));
-  globalShortcut.register('CommandOrControl+Shift+Return', () => runFeature('assist', ''));
-  globalShortcut.register('CommandOrControl+Shift+L', () => toggleCapture());
-  globalShortcut.register('CommandOrControl+Shift+M', () => openMeetingWindow());
+  shortcutState.say = globalShortcut.register('CommandOrControl+Return', () => {
+    if (!isOverlayVisible()) return;
+    runFeature('say', '');
+  });
+  globalShortcut.register('CommandOrControl+Enter', () => {
+    if (!isOverlayVisible()) return;
+    runFeature('look', '');
+  });
+  shortcutState.assist = globalShortcut.register('CommandOrControl+Shift+Enter', () => {
+    if (!isOverlayVisible()) return;
+    runFeature('assist', '');
+  });
+  globalShortcut.register('CommandOrControl+Shift+Return', () => {
+    if (!isOverlayVisible()) return;
+    runFeature('assist', '');
+  });
+  globalShortcut.register('CommandOrControl+Shift+L', () => {
+    if (!isOverlayVisible()) return;
+    toggleCapture();
+  });
+  globalShortcut.register('CommandOrControl+Shift+M', () => {
+    if (!isOverlayVisible()) return;
+    openMeetingWindow();
+  });
   globalShortcut.register('CommandOrControl+Shift+K', () => {
+    if (!isOverlayVisible()) return;
     transcript.length = 0;
     buffers.you = [];
     buffers.them = [];
@@ -1454,70 +1540,162 @@ function registerShortcuts() {
   });
 
   // Phantom Lens Core Shortcuts
-  globalShortcut.register('CommandOrControl+K', () => send('toggle-ask-input', {}));
+  globalShortcut.register('CommandOrControl+K', () => {
+    if (!isOverlayVisible()) return;
+    send('toggle-ask-input', {});
+  });
   globalShortcut.register('CommandOrControl+R', () => {
+    if (!isOverlayVisible()) return;
     state.busy = false;
     sessionDirectives.length = 0;
     send('reset-view', {});
     send('status', { message: 'Reset and cancelled.' });
   });
-  globalShortcut.register('CommandOrControl+,', () => send('open-settings', {}));
+  globalShortcut.register('CommandOrControl+,', () => {
+    if (!isOverlayVisible()) return;
+    send('open-settings', {});
+  });
   globalShortcut.register('CommandOrControl+Shift+,', () => {
+    if (!isOverlayVisible()) return;
     interactiveOverride = !interactiveOverride;
     applyInteractivityState();
     send('settings-unlock', { interactive: interactiveOverride });
   });
-  globalShortcut.register('CommandOrControl+\\', () => toggleOverlayVisibility());
-  globalShortcut.register('CommandOrControl+Shift+H', () => toggleOverlayVisibility());
-  globalShortcut.register('CommandOrControl+Shift+R', () => emergencyRecover());
-  shortcutState.quit = globalShortcut.register('CommandOrControl+Q', () => app.quit());
-  globalShortcut.register('CommandOrControl+Shift+X', () => app.quit());
+  shortcutState.quit = globalShortcut.register('CommandOrControl+Q', () => {
+    if (!isOverlayVisible()) return;
+    app.quit();
+  });
+  globalShortcut.register('CommandOrControl+Shift+X', () => {
+    if (!isOverlayVisible()) return;
+    app.quit();
+  });
 
   // Scrolling shortcuts
-  globalShortcut.register('Alt+Up', () => send('response:scroll', { delta: -120 }));
-  globalShortcut.register('Alt+Down', () => send('response:scroll', { delta: 120 }));
-  globalShortcut.register('Alt+Left', () => send('code:scroll', { delta: -120 }));
-  globalShortcut.register('Alt+Right', () => send('code:scroll', { delta: 120 }));
+  globalShortcut.register('Alt+Up', () => {
+    if (!isOverlayVisible()) return;
+    send('response:scroll', { delta: -120 });
+  });
+  globalShortcut.register('Alt+Down', () => {
+    if (!isOverlayVisible()) return;
+    send('response:scroll', { delta: 120 });
+  });
+  globalShortcut.register('Alt+Left', () => {
+    if (!isOverlayVisible()) return;
+    send('code:scroll', { delta: -120 });
+  });
+  globalShortcut.register('Alt+Right', () => {
+    if (!isOverlayVisible()) return;
+    send('code:scroll', { delta: 120 });
+  });
 
   // History navigation
-  globalShortcut.register('CommandOrControl+Shift+Up', () => send('history:nav', { direction: 'prev' }));
-  globalShortcut.register('CommandOrControl+Shift+Down', () => send('history:nav', { direction: 'next' }));
+  globalShortcut.register('CommandOrControl+Shift+Up', () => {
+    if (!isOverlayVisible()) return;
+    send('history:nav', { direction: 'prev' });
+  });
+  globalShortcut.register('CommandOrControl+Shift+Down', () => {
+    if (!isOverlayVisible()) return;
+    send('history:nav', { direction: 'next' });
+  });
 
   // Window movement (50px)
-  globalShortcut.register('CommandOrControl+Left', () => moveWindow(-50, 0));
-  globalShortcut.register('CommandOrControl+Right', () => moveWindow(50, 0));
-  globalShortcut.register('CommandOrControl+Up', () => moveWindow(0, -50));
-  globalShortcut.register('CommandOrControl+Down', () => moveWindow(0, 50));
+  globalShortcut.register('CommandOrControl+Left', () => {
+    if (!isOverlayVisible()) return;
+    moveWindow(-50, 0);
+  });
+  globalShortcut.register('CommandOrControl+Right', () => {
+    if (!isOverlayVisible()) return;
+    moveWindow(50, 0);
+  });
+  globalShortcut.register('CommandOrControl+Up', () => {
+    if (!isOverlayVisible()) return;
+    moveWindow(0, -50);
+  });
+  globalShortcut.register('CommandOrControl+Down', () => {
+    if (!isOverlayVisible()) return;
+    moveWindow(0, 50);
+  });
 
   // Opacity adjustments
-  globalShortcut.register('CommandOrControl+Shift+]', () => adjustOpacity(0.1));
-  globalShortcut.register('CommandOrControl+Shift+=', () => adjustOpacity(0.1));
-  globalShortcut.register('CommandOrControl+Shift+Plus', () => adjustOpacity(0.1));
-  globalShortcut.register('CommandOrControl+Shift+[', () => adjustOpacity(-0.1));
-  globalShortcut.register('CommandOrControl+Shift+-', () => adjustOpacity(-0.1));
-  globalShortcut.register('CommandOrControl+Shift+Minus', () => adjustOpacity(-0.1));
+  globalShortcut.register('CommandOrControl+Shift+]', () => {
+    if (!isOverlayVisible()) return;
+    adjustOpacity(0.1);
+  });
+  globalShortcut.register('CommandOrControl+Shift+=', () => {
+    if (!isOverlayVisible()) return;
+    adjustOpacity(0.1);
+  });
+  globalShortcut.register('CommandOrControl+Shift+Plus', () => {
+    if (!isOverlayVisible()) return;
+    adjustOpacity(0.1);
+  });
+  globalShortcut.register('CommandOrControl+Shift+[', () => {
+    if (!isOverlayVisible()) return;
+    adjustOpacity(-0.1);
+  });
+  globalShortcut.register('CommandOrControl+Shift+-', () => {
+    if (!isOverlayVisible()) return;
+    adjustOpacity(-0.1);
+  });
+  globalShortcut.register('CommandOrControl+Shift+Minus', () => {
+    if (!isOverlayVisible()) return;
+    adjustOpacity(-0.1);
+  });
 
   // Transparency mode
-  globalShortcut.register('CommandOrControl+Shift+V', () => send('transparency:toggle', {}));
+  globalShortcut.register('CommandOrControl+Shift+V', () => {
+    if (!isOverlayVisible()) return;
+    send('transparency:toggle', {});
+  });
 
   // Attached context files
-  globalShortcut.register('CommandOrControl+O', () => attachFileDialog());
-  globalShortcut.register('CommandOrControl+Shift+O', () => removeLastAttachedFile());
+  globalShortcut.register('CommandOrControl+O', () => {
+    if (!isOverlayVisible()) return;
+    attachFileDialog();
+  });
+  globalShortcut.register('CommandOrControl+Shift+O', () => {
+    if (!isOverlayVisible()) return;
+    removeLastAttachedFile();
+  });
 
   // Update check
   globalShortcut.register('CommandOrControl+Shift+U', () => {
+    if (!isOverlayVisible()) return;
     send('status', { message: 'Checking for updates...' });
   });
 
   // Legacy LeetCode & Hide shortcuts kept
-  shortcutState.leetcode = globalShortcut.register('CommandOrControl+H', () => runFeature('leetcode', ''));
-  shortcutState.hide = globalShortcut.register('CommandOrControl+Shift+/', () => send('hide:toggle', {}));
+  shortcutState.leetcode = globalShortcut.register('CommandOrControl+H', () => {
+    if (!isOverlayVisible()) return;
+    runFeature('leetcode', '');
+  });
+  shortcutState.hide = globalShortcut.register('CommandOrControl+Shift+/', () => {
+    if (!isOverlayVisible()) return;
+    send('hide:toggle', {});
+  });
 
   for (const [name, wasRegistered] of Object.entries(shortcutState)) {
     if (!wasRegistered) {
       recordEvent({ level: 'warn', event: 'shortcut_unavailable', msg: 'another application holds the ' + name + ' shortcut', frame: 'registerShortcuts', context: { shortcut: name } });
     }
   }
+
+  appShortcutsRegistered = true;
+}
+
+function unregisterAppShortcuts() {
+  if (!appShortcutsRegistered) return;
+  for (const key of APP_SHORTCUT_KEYS) {
+    try {
+      globalShortcut.unregister(key);
+    } catch (_) {}
+  }
+  appShortcutsRegistered = false;
+}
+
+function registerShortcuts() {
+  registerVisibilityShortcuts();
+  registerAppShortcuts();
 }
 
 // -------- permissions --------
@@ -1749,6 +1927,7 @@ app.whenReady().then(async () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  appShortcutsRegistered = false;
   // Quitting mid-meeting is a pause, not an end: the meeting stays open on disk
   // so a relaunch within the resume window picks it back up (a stale one is
   // closed and its notes written at the next launch). Just get the bytes down.
