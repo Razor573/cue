@@ -128,10 +128,11 @@ let slideBusy = false;
 let slideDisabled = false; // set when the chat key rejects slide captions (stops cost spam)
 let slideTxCursor = 0; // transcript.length at last emitted slide
 const FLUSH_MS = 900;
-const STREAM_INACTIVITY_MS = 25000; // abort a stalled LLM stream so state.busy can't wedge forever
+const STREAM_INACTIVITY_MS = 20000; // 20s inactivity watchdog resetting on every thought and token chunk
 const MIN_BYTES = Math.floor(16000 * 2 * 0.12); // ~0.12s
 const RMS_GATE = 180;
 let flushTimer = null;
+const sessionDirectives = [];
 let whisperModelManager = null;
 let localWhisperTranscriber = null;
 let activeWhisperModelId = null;
@@ -779,7 +780,25 @@ async function runFeature(mode, userText) {
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
     const category = mode !== 'leetcode' ? detectCategory(transcript) : null;
-    send('llm:start', { userBubble, small: !!def.small, category });
+
+    // Command-like sentence detection & session directives
+    const directiveMatch = (userText || '').match(/^(in this (assessment|interview|test|exam)|for this session|always|from now on|never|format:|remember:|give me .+ and .+ for all questions)/i);
+    if (directiveMatch) {
+      const trimmed = userText.trim();
+      if (!sessionDirectives.includes(trimmed)) {
+        sessionDirectives.push(trimmed);
+      }
+      send('session:directive', { directives: sessionDirectives, added: trimmed });
+      const isOnlyDirective = !/(\?|solve|what is|how do|calculate|explain)/i.test(trimmed);
+      if (isOnlyDirective) {
+        send('llm:start', { mode, userText: trimmed });
+        send('llm:token', { text: `**Directive Active:** "${trimmed}"\n\nI have saved this directive and will apply it to all upcoming questions.` });
+        send('llm:done', {});
+        return;
+      }
+    }
+
+    send('llm:start', { mode, userText: userText || '', userBubble, small: !!def.small, category });
 
     if (!llm.ready) {
       const message = llm.configurationError || ('Complete the ' + settings.provider + ' provider settings. Model: ' + (llm.model || 'unset') + '.');
@@ -837,6 +856,11 @@ async function runFeature(mode, userText) {
 
     const settingsForPrompt = store.getSettings();
     let contextBlock = buildInterviewContext(settingsForPrompt, mode, transcript);
+    if (sessionDirectives.length > 0) {
+      contextBlock = (contextBlock ? contextBlock + '\n\n' : '') +
+        'ACTIVE SESSION DIRECTIVES (MUST FOLLOW FOR ALL RESPONSES):\n' +
+        sessionDirectives.map(d => `- ${d}`).join('\n');
+    }
     // Summaries of the last few meetings, so "what did we agree last time?"
     // has something to draw on. Never the current meeting, never leetcode.
     const memoryBlock = mode !== 'leetcode' && meetingMemory ? meetingMemory.memoryBlock() : null;
@@ -916,6 +940,11 @@ ipcMain.handle('vertex:parse-sa', async (_e, rawJson) => {
   } catch (err) {
     return { ok: false, error: (err && err.message) || String(err) };
   }
+});
+ipcMain.handle('session:directive-clear', () => {
+  sessionDirectives.length = 0;
+  send('session:directive', { directives: [], cleared: true });
+  return { ok: true };
 });
 ipcMain.handle('settings:set', (_e, patch) => {
   sttDisabled = false;
@@ -1421,6 +1450,7 @@ function registerShortcuts() {
   globalShortcut.register('CommandOrControl+K', () => send('toggle-ask-input', {}));
   globalShortcut.register('CommandOrControl+R', () => {
     state.busy = false;
+    sessionDirectives.length = 0;
     send('reset-view', {});
     send('status', { message: 'Reset and cancelled.' });
   });

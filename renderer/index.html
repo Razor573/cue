@@ -41,6 +41,7 @@
       <div id="interactive-pill" class="interactive-pill locked" title="Click-through status (Ctrl+Shift+, to toggle)">
         <span class="pill-lock-icon">🔒</span><span class="pill-text">Pass-through</span>
       </div>
+      <div id="history-pill" class="history-pill hidden" title="Response history (Ctrl+Shift+Up/Down)">[0/0]</div>
     </div>
 
     <!-- Main assistant panel -->
@@ -54,6 +55,11 @@
 
           <!-- Left column: AI responses -->
           <div id="panel-main">
+            <div id="directive-badge" class="directive-badge hidden">
+              <span class="directive-icon">⚡</span>
+              <span class="directive-text"></span>
+              <button class="directive-clear" id="directive-clear-btn" title="Clear directive" aria-label="Clear directive">✕</button>
+            </div>
             <div id="messages"></div>
 
             <div id="action-row">

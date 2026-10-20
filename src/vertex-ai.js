@@ -315,7 +315,7 @@ function buildVertexPayload(params = {}, modelId = '') {
     userPrompt,
     imageDataUrl,
     imageBase64,
-    maxTokens = 1024,
+    maxTokens = 8192,
     temperature = 0.3,
     thinkingLevel,
     webSearch = false
@@ -355,7 +355,7 @@ function buildVertexPayload(params = {}, modelId = '') {
   const headroom = includeThinking ? (lvl === 'HIGH' ? 4096 : 1024) : 1024;
 
   const generationConfig = {
-    maxOutputTokens: Math.max(16, Number(maxTokens) || 1024) + headroom,
+    maxOutputTokens: Math.max(16, Number(maxTokens) || 8192) + headroom,
     temperature: typeof temperature === 'number' ? temperature : 0.3
   };
 

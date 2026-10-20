@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('cue', {
   permissionsCheck: () => ipcRenderer.invoke('permissions:check'),
   permissionsRequest: () => ipcRenderer.invoke('permissions:request'),
   permissionsContinue: () => ipcRenderer.send('permissions:continue'),
+  clearSessionDirectives: () => ipcRenderer.invoke('session:directive-clear'),
   log: (msg) => ipcRenderer.send('log', msg),
   on: (channel, cb) => {
     const allowed = [
@@ -64,7 +65,7 @@ contextBridge.exposeInMainWorld('cue', {
       'stealth-key', 'toggle-ask-input', 'open-settings', 'settings-unlock',
       'reset-view', 'response:scroll', 'code:scroll', 'history:nav',
       'transparency:toggle', 'interactive:state', 'attached-files', 'emergency:recover',
-      'open-meeting-companion'
+      'open-meeting-companion', 'session:directive'
     ];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, data) => cb(data));

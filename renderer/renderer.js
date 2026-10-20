@@ -1,5 +1,204 @@
 /* cue renderer — UI state, mic capture, IPC, streaming render. */
 (function () {
+  const COMMAND_REPLACEMENTS = [
+    [/\\text\{([^}]*)\}/g, '$1'],
+    [/\\mathrm\{([^}]*)\}/g, '$1'],
+    [/\\textbf\{([^}]*)\}/g, '$1'],
+    [/\\textit\{([^}]*)\}/g, '$1'],
+    [/\\times/g, '×'],
+    [/\\div/g, '÷'],
+    [/\\pm/g, '±'],
+    [/\\mp/g, '∓'],
+    [/\\cdot/g, '·'],
+    [/\\leq/g, '≤'],
+    [/\\geq/g, '≥'],
+    [/\\neq/g, '≠'],
+    [/\\approx/g, '≈'],
+    [/\\equiv/g, '≡'],
+    [/\\infty/g, '∞'],
+    [/\\rightarrow/g, '→'],
+    [/\\leftarrow/g, '←'],
+    [/\\Rightarrow/g, '⟹'],
+    [/\\Leftarrow/g, '⟸'],
+    [/\\to\b/g, '→'],
+    [/\\neg\b/g, '¬'],
+    [/\\land\b/g, '∧'],
+    [/\\lor\b/g, '∨'],
+    [/\\in\b/g, '∈'],
+    [/\\Omega\b/g, 'Ω'],
+    [/\\theta\b/g, 'θ'],
+    [/\\log\b/g, 'log'],
+    [/\\\$/g, '$'],
+    [/\\%/g, '%'],
+    [/\\&/g, '&'],
+    [/\\#/g, '#'],
+    [/\\_/g, '_'],
+    [/\\[dt]?frac\{([^}]*)\}\{([^}]*)\}/g, '$1/$2'],
+    [/\\sqrt\{([^}]*)\}/g, '√$1'],
+    [/\\sqrt/g, '√'],
+    [/\\^{([^}]*)}/g, '^$1'],
+    [/\\\\(\s*\n|\s)/g, ' '],
+    [/\\(\d)/g, '$$$1'],
+    [/\\([a-zA-Z]+)/g, '$1']
+  ];
+
+  function splitMathSegments(content) {
+    const segments = [];
+    let i = 0, current = '', n = content.length;
+    const flush = (isMath) => { if (current) { segments.push({ text: current, isMath }); current = ''; } };
+    while (i < n) {
+      const ch = content[i];
+      if (ch === '\\' && i + 1 < n && content[i + 1] === '$') { current += '\\$'; i += 2; continue; }
+      if (ch === '$') {
+        if (i + 1 < n && content[i + 1] === '$') {
+          const close = content.indexOf('$$', i + 2);
+          if (close !== -1) { flush(false); segments.push({ text: content.slice(i, close + 2), isMath: true }); i = close + 2; continue; }
+          current += '$$'; i += 2; continue;
+        }
+        let j = i + 1, found = -1;
+        while (j < n) {
+          if (content[j] === '\\' && j + 1 < n && content[j + 1] === '$') { j += 2; continue; }
+          if (content[j] === '$') { if (j + 1 < n && content[j + 1] === '$') break; found = j; break; }
+          if (content[j] === '\n') break;
+          j++;
+        }
+        if (found !== -1) {
+          const inner = content.slice(i + 1, found);
+          const looksLikeMath = /\\/.test(inner) || /^[^a-zA-Z]{0,40}$/.test(inner.trim());
+          if (looksLikeMath && inner.trim().length > 0) {
+            flush(false);
+            segments.push({ text: content.slice(i, found + 1), isMath: true });
+            i = found + 1;
+            continue;
+          }
+        }
+        current += '$'; i++; continue;
+      }
+      current += ch; i++;
+    }
+    flush(false);
+    return segments;
+  }
+
+  function sanitizeLatex(content) {
+    if (!content) return content || '';
+    const segments = splitMathSegments(content);
+    return segments.map(seg => {
+      if (seg.isMath) {
+        let t = seg.text;
+        for (const [pattern, rep] of COMMAND_REPLACEMENTS) { t = t.replace(pattern, rep); }
+        return t.replace(/^\$\$|\$\$$/g, '').replace(/^\$|\$$/g, '');
+      }
+      let out = seg.text;
+      for (const [pattern, rep] of COMMAND_REPLACEMENTS) { out = out.replace(pattern, rep); }
+      return out.replace(/\$(\s|$)/g, '$1');
+    }).join('');
+  }
+
+  function esc(s) { return String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+  function renderMarkdown(text) {
+    if (!text) return '';
+    let normalized = text.replace(/^xplanation:/i, '**Explanation:**');
+    normalized = sanitizeLatex(normalized);
+    const lines = normalized.split('\n');
+    let html = '', inCode = false, inUl = false, inOl = false, pBuf = [];
+    const inline = (s) => esc(s)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    const flushP = () => {
+      if (pBuf.length) {
+        html += '<p>' + inline(pBuf.join(' ')) + '</p>';
+        pBuf = [];
+      }
+    };
+    const flushList = () => {
+      if (inUl) { html += '</ul>'; inUl = false; }
+      if (inOl) { html += '</ol>'; inOl = false; }
+    };
+    const flushAll = () => {
+      flushP();
+      flushList();
+    };
+
+    for (const raw of lines) {
+      const trimmed = raw.trim();
+      if (/^```/.test(trimmed)) {
+        if (!inCode) {
+          flushAll();
+          html += '<pre><code>';
+          inCode = true;
+        } else {
+          html += '</code></pre>';
+          inCode = false;
+        }
+        continue;
+      }
+      if (inCode) {
+        html += esc(raw) + '\n';
+        continue;
+      }
+      if (trimmed === '') {
+        flushAll();
+        continue;
+      }
+      const hMatch = trimmed.match(/^(#{1,3})\s+(.*)$/);
+      if (hMatch) {
+        flushAll();
+        const level = hMatch[1].length;
+        html += `<h${level}>${inline(hMatch[2])}</h${level}>`;
+        continue;
+      }
+      const olMatch = trimmed.match(/^(\d+)\.\s+(.*)$/);
+      if (olMatch) {
+        flushP();
+        if (inUl) { html += '</ul>'; inUl = false; }
+        if (!inOl) { html += '<ol class="response-ol">'; inOl = true; }
+        html += '<li>' + inline(olMatch[2]) + '</li>';
+        continue;
+      }
+      const ulMatch = trimmed.match(/^[-*]\s+(.*)$/);
+      if (ulMatch) {
+        flushP();
+        if (inOl) { html += '</ol>'; inOl = false; }
+        if (!inUl) { html += '<ul class="response-ul">'; inUl = true; }
+        html += '<li>' + inline(ulMatch[1]) + '</li>';
+        continue;
+      }
+      if (inUl || inOl) {
+        flushList();
+      }
+      pBuf.push(trimmed);
+    }
+    flushAll();
+    if (inCode) html += '</code></pre>';
+    return html;
+  }
+
+  const scrollVelocity = { last: 0, mult: 1 };
+  function rampedScroll(el, dx, dy) {
+    if (!el) return;
+    const now = performance.now();
+    if (now - scrollVelocity.last < 160) {
+      scrollVelocity.mult = Math.min(scrollVelocity.mult * 1.4, 8);
+    } else {
+      scrollVelocity.mult = 1;
+    }
+    scrollVelocity.last = now;
+    el.scrollBy({ left: dx * scrollVelocity.mult, top: dy * scrollVelocity.mult, behavior: 'auto' });
+  }
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { sanitizeLatex, renderMarkdown, splitMathSegments, COMMAND_REPLACEMENTS, rampedScroll };
+  }
+  if (typeof window !== 'undefined') {
+    window.sanitizeLatex = sanitizeLatex;
+    window.renderMarkdown = renderMarkdown;
+  }
+  if (typeof document === 'undefined') {
+    return;
+  }
+
   const { icon } = window.ICONS;
   const cue = window.cue; // exposed by preload
   const $ = (s) => document.querySelector(s);
@@ -55,33 +254,71 @@
 
   const messages = $('#messages');
 
-  function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  let streamedText = '';
+  let accumulatedThinking = '';
+  let thinkingStart = 0;
+  let thinkingElapsed = 0;
+  let isThinking = false;
+  let thinkingTimer = null;
+  let thinkingEl = null;
+  let currentMode = '';
+  let currentQuery = '';
+  let renderScheduled = false;
 
-  // minimal, safe markdown: fenced code, bullets, inline code, bold, paragraphs
-  function renderMarkdown(text) {
-    const lines = text.split('\n');
-    let html = '', inCode = false, inList = false, buf = [];
-    const flushP = () => { if (buf.length) { html += '<p>' + inline(buf.join(' ')) + '</p>'; buf = []; } };
-    const inline = (s) => esc(s)
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    for (const raw of lines) {
-      const line = raw;
-      if (/^```/.test(line.trim())) {
-        if (!inCode) { flushP(); if (inList) { html += '</ul>'; inList = false; } html += '<pre><code>'; inCode = true; }
-        else { html += '</code></pre>'; inCode = false; }
-        continue;
-      }
-      if (inCode) { html += esc(line) + '\n'; continue; }
-      if (/^\s*[-*]\s+/.test(line)) { flushP(); if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + inline(line.replace(/^\s*[-*]\s+/, '')) + '</li>'; continue; }
-      if (line.trim() === '') { flushP(); if (inList) { html += '</ul>'; inList = false; } continue; }
-      buf.push(line.trim());
+  const responseHistory = [];
+  let historyIndex = -1;
+
+  function updateHistoryPill() {
+    const pill = $('#history-pill');
+    if (!pill) return;
+    if (responseHistory.length === 0) {
+      pill.classList.add('hidden');
+    } else {
+      pill.classList.remove('hidden');
+      pill.textContent = `[${historyIndex + 1}/${responseHistory.length}]`;
     }
-    flushP(); if (inList) html += '</ul>'; if (inCode) html += '</code></pre>';
-    return html;
   }
 
-  function clearMessages() { messages.innerHTML = ''; aiEl = null; caretEl = null; }
+  function renderHistoryItem(item) {
+    if (!item) return;
+    messages.innerHTML = '';
+    if (item.query || item.userBubble) {
+      const b = document.createElement('div');
+      b.className = 'user-bubble';
+      b.textContent = item.query || item.userBubble;
+      messages.appendChild(b);
+    }
+    if (item.thinking) {
+      const card = document.createElement('div');
+      card.className = 'thinking-card';
+      const dur = item.duration || 0;
+      const tText = dur ? `Thought for ${dur}s` : 'Thinking process';
+      card.innerHTML = `
+        <div class="thinking-header">
+          <span class="thinking-sparkle">✨</span>
+          <span class="thinking-title">${esc(tText)}</span>
+          <span class="thinking-chev">▼</span>
+        </div>
+        <div class="thinking-body">
+          <pre class="thinking-text">${esc(item.thinking)}</pre>
+        </div>
+      `;
+      const hdr = card.querySelector('.thinking-header');
+      if (hdr) hdr.addEventListener('click', () => card.classList.toggle('expanded'));
+      messages.appendChild(card);
+    }
+    const respEl = document.createElement('div');
+    respEl.className = 'ai-text' + (item.small ? ' small' : '');
+    respEl.innerHTML = renderMarkdown(item.text);
+    messages.appendChild(respEl);
+    messages.scrollTop = 0;
+  }
+
+  function clearMessages() {
+    messages.innerHTML = '';
+    aiEl = null;
+    caretEl = null;
+  }
 
   function addUserBubble(text) {
     const b = document.createElement('div');
@@ -90,13 +327,9 @@
     messages.appendChild(b);
   }
 
-  let thinkingEl = null;
-  let accumulatedThinking = '';
-  let thinkingStart = 0;
-  let thinkingTimer = null;
-
   function finalizeCurrentResponse(interrupted = false) {
     if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
+    isThinking = false;
     if (thinkingEl) {
       thinkingEl.classList.remove('expanded');
       thinkingEl = null;
@@ -125,31 +358,40 @@
   }
 
   function appendToken(t) {
-    if (thinkingEl) {
+    if (isThinking) {
+      isThinking = false;
       if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
-      thinkingEl.classList.remove('expanded');
-      const elapsed = Math.max(1, Math.floor((Date.now() - thinkingStart) / 1000));
-      const titleEl = thinkingEl.querySelector('.thinking-title');
-      if (titleEl) titleEl.textContent = `Thought for ${elapsed}s`;
-      thinkingEl = null;
+      thinkingElapsed = Math.max(1, Math.floor((Date.now() - thinkingStart) / 1000));
+      if (thinkingEl) {
+        thinkingEl.classList.remove('expanded');
+        const titleEl = thinkingEl.querySelector('.thinking-title');
+        if (titleEl) titleEl.textContent = `Thought for ${thinkingElapsed}s`;
+      }
     }
-    if (!aiEl) startAi(false);
-    aiEl.dataset.raw += t;
-    const span = document.createElement('span');
-    span.className = 'w';
-    span.textContent = t;
-    // Guard: caretEl must be a child of aiEl
-    if (caretEl && caretEl.parentNode === aiEl) {
-      aiEl.insertBefore(span, caretEl);
-    } else {
-      aiEl.appendChild(span);
+    streamedText += t;
+    if (!aiEl) {
+      aiEl = document.createElement('div');
+      aiEl.className = 'ai-text';
+      aiEl.dataset.raw = '';
+      messages.appendChild(aiEl);
+    }
+    aiEl.dataset.raw = streamedText;
+
+    if (!renderScheduled) {
+      renderScheduled = true;
+      requestAnimationFrame(() => {
+        renderScheduled = false;
+        if (aiEl) {
+          aiEl.innerHTML = renderMarkdown(streamedText);
+          messages.scrollTop = messages.scrollHeight;
+        }
+      });
     }
   }
 
   function finalizeAi() {
     if (!aiEl) return;
-    const raw = aiEl.dataset.raw || '';
-    aiEl.innerHTML = renderMarkdown(raw);
+    aiEl.innerHTML = renderMarkdown(streamedText || aiEl.dataset.raw || '');
     aiEl = null; caretEl = null;
   }
 
@@ -1185,103 +1427,118 @@
     const title = last && last.caption ? last.caption.split('\n')[0].slice(0, 80) : 'Slide ' + count;
     showToast(`Slide ${count} captured · ${title}`, 3000);
   });
-  cue.on('llm:start', ({ userBubble, small, category }) => {
-    responseCount++;
-    if (responseCount > MAX_RESPONSES) {
-      const oldest = messages.querySelector('.response-group');
-      if (oldest) oldest.remove();
-      responseCount = MAX_RESPONSES;
-    }
-    const group = document.createElement('div');
-    group.className = 'response-group';
-    const sep = document.createElement('div');
-    sep.className = 'response-sep';
-    sep.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    group.appendChild(sep);
+  cue.on('llm:start', ({ userBubble, small, category, mode, userText }) => {
+    finalizeCurrentResponse(true);
+    streamedText = '';
+    accumulatedThinking = '';
+    thinkingStart = Date.now();
+    thinkingElapsed = 0;
+    isThinking = true;
+    currentMode = mode || '';
+    currentQuery = userBubble || userText || '';
+
+    // Discrete response window: clear previous view
+    messages.innerHTML = '';
+
     if (userBubble) {
       const b = document.createElement('div');
       b.className = 'user-bubble';
       b.textContent = userBubble;
-      group.appendChild(b);
+      messages.appendChild(b);
     }
     if (category) {
       const pill = document.createElement('div');
       pill.className = 'category-pill';
       pill.textContent = category.charAt(0).toUpperCase() + category.slice(1);
-      group.appendChild(pill);
+      messages.appendChild(pill);
     }
+
+    // Immediate ThinkingIndicator
+    thinkingEl = document.createElement('div');
+    thinkingEl.className = 'thinking-card expanded';
+    thinkingEl.innerHTML = `
+      <div class="thinking-header">
+        <span class="thinking-sparkle">✨</span>
+        <span class="thinking-title">Thinking… (0s)</span>
+        <span class="thinking-chev">▼</span>
+      </div>
+      <div class="thinking-body">
+        <div class="thinking-placeholder">Analyzing screen context and formulating solution...</div>
+        <pre class="thinking-text" style="display:none;"></pre>
+      </div>
+    `;
+    const headerEl = thinkingEl.querySelector('.thinking-header');
+    if (headerEl) {
+      headerEl.addEventListener('click', () => {
+        thinkingEl.classList.toggle('expanded');
+      });
+    }
+    messages.appendChild(thinkingEl);
+
+    if (thinkingTimer) clearInterval(thinkingTimer);
+    thinkingTimer = setInterval(() => {
+      if (!thinkingEl || !isThinking) {
+        clearInterval(thinkingTimer);
+        thinkingTimer = null;
+        return;
+      }
+      thinkingElapsed = Math.max(0, Math.floor((Date.now() - thinkingStart) / 1000));
+      const title = thinkingEl.querySelector('.thinking-title');
+      if (title && thinkingEl.classList.contains('expanded')) {
+        title.textContent = `Thinking… (${thinkingElapsed}s)`;
+      }
+    }, 1000);
+
     aiEl = document.createElement('div');
     aiEl.className = 'ai-text' + (small ? ' small' : '');
     aiEl.dataset.raw = '';
     caretEl = document.createElement('span');
     caretEl.className = 'ai-caret';
     aiEl.appendChild(caretEl);
-    group.appendChild(aiEl);
-    messages.appendChild(group);
-    // Use requestAnimationFrame so the DOM is fully updated before scrolling.
-    // Scroll #messages directly rather than calling sep.scrollIntoView(): that
-    // scrolls *every* scrollable ancestor, and once the panel is tall enough it
-    // scrolls the document too, aligning the separator to the top of the window
-    // and pushing #toolbar out of view. html/body are overflow:hidden, so there
-    // is no scrollbar or wheel gesture to undo it — the Stop/Hide/Quit controls
-    // just never come back.
+    messages.appendChild(aiEl);
+
     requestAnimationFrame(() => {
-      if (sep && sep.isConnected) {
-        messages.scrollTo({ top: sep.offsetTop - messages.offsetTop, behavior: 'smooth' });
-      }
+      messages.scrollTop = 0;
     });
     setBusy(true);
   });
   cue.on('llm:thought', ({ text }) => {
-    if (!thinkingEl) {
-      accumulatedThinking = '';
-      thinkingStart = Date.now();
-      thinkingEl = document.createElement('div');
-      thinkingEl.className = 'thinking-card expanded';
-      thinkingEl.innerHTML = `
-        <div class="thinking-header">
-          <span class="thinking-sparkle">✨</span>
-          <span class="thinking-title">Thinking… (0s)</span>
-          <span class="thinking-chev">▼</span>
-        </div>
-        <div class="thinking-body">
-          <pre class="thinking-text"></pre>
-        </div>
-      `;
-      const headerEl = thinkingEl.querySelector('.thinking-header');
-      if (headerEl) {
-        headerEl.addEventListener('click', () => {
-          thinkingEl.classList.toggle('expanded');
-        });
-      }
-      if (aiEl && aiEl.parentNode) {
-        aiEl.parentNode.insertBefore(thinkingEl, aiEl);
-      } else {
-        messages.appendChild(thinkingEl);
-      }
-      if (thinkingTimer) clearInterval(thinkingTimer);
-      thinkingTimer = setInterval(() => {
-        if (!thinkingEl) {
-          clearInterval(thinkingTimer);
-          thinkingTimer = null;
-          return;
-        }
-        const elapsed = Math.max(0, Math.floor((Date.now() - thinkingStart) / 1000));
-        const title = thinkingEl.querySelector('.thinking-title');
-        if (title && thinkingEl.classList.contains('expanded')) {
-          title.textContent = `Thinking… (${elapsed}s)`;
-        }
-      }, 1000);
-    }
+    if (!thinkingEl) return;
     accumulatedThinking += text;
+    const placeholder = thinkingEl.querySelector('.thinking-placeholder');
+    if (placeholder) placeholder.style.display = 'none';
     const txtEl = thinkingEl.querySelector('.thinking-text');
     if (txtEl) {
+      txtEl.style.display = 'block';
       txtEl.textContent = accumulatedThinking;
+    }
+    const bodyEl = thinkingEl.querySelector('.thinking-body');
+    if (bodyEl) {
+      bodyEl.scrollTop = bodyEl.scrollHeight;
     }
     messages.scrollTop = messages.scrollHeight;
   });
   cue.on('llm:token', ({ text }) => appendToken(text));
-  cue.on('llm:done', () => { finalizeCurrentResponse(false); setBusy(false); });
+  cue.on('llm:done', ({ aborted } = {}) => {
+    finalizeCurrentResponse(false);
+    setBusy(false);
+    if (!aborted && (streamedText || accumulatedThinking)) {
+      responseHistory.push({
+        id: Date.now(),
+        text: streamedText,
+        thinking: accumulatedThinking,
+        duration: thinkingElapsed,
+        mode: currentMode,
+        query: currentQuery,
+        userBubble: currentQuery
+      });
+      if (responseHistory.length > MAX_RESPONSES) {
+        responseHistory.shift();
+      }
+      historyIndex = responseHistory.length - 1;
+      updateHistoryPill();
+    }
+  });
   cue.on('llm:error', ({ message, action }) => {
     finalizeCurrentResponse(false);
     if (!aiEl) startAi(true);
@@ -2434,7 +2691,6 @@
       publikCard: true
     };
   }
-  function esc(text) { const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }
   let obDialog = false; // true while the publik card is shown alone, after onboarding
   function showPublikDisclosure() {
     if (!publikState || !publikState.available) return;
@@ -2607,14 +2863,22 @@
 
   cue.on('reset-view', () => {
     clearMessages();
+    streamedText = '';
+    accumulatedThinking = '';
+    isThinking = false;
+    responseHistory.length = 0;
+    historyIndex = -1;
+    updateHistoryPill();
+    const badge = $('#directive-badge');
+    if (badge) badge.classList.add('hidden');
     input.value = '';
     syncPlaceholder();
     updateSendButtonState();
     setBusy(false);
     if (stealthTypingActive) {
       stealthTypingActive = false;
-      const badge = $('#stealth-typing-badge');
-      if (badge) badge.classList.add('hidden');
+      const b = $('#stealth-typing-badge');
+      if (b) b.classList.add('hidden');
       if (cue && cue.stopStealthTyping) void cue.stopStealthTyping();
     }
   });
@@ -2624,30 +2888,60 @@
     if (scrimEl && !scrimEl.classList.contains('hidden')) {
       const activePane = scrimEl.querySelector('.s-tab-pane:not(.hidden)');
       if (activePane) {
-        activePane.scrollBy({ top: delta || 0, behavior: 'smooth' });
+        rampedScroll(activePane, 0, delta || 0);
         return;
       }
     }
     const m = $('#messages');
-    if (m) m.scrollBy({ top: delta || 0, behavior: 'smooth' });
+    if (m) rampedScroll(m, 0, delta || 0);
   });
 
   cue.on('code:scroll', ({ delta }) => {
     const codes = document.querySelectorAll('#messages pre');
     if (codes.length) {
-      codes[codes.length - 1].scrollBy({ left: delta || 0, behavior: 'smooth' });
+      rampedScroll(codes[codes.length - 1], delta || 0, 0);
     }
   });
 
   cue.on('history:nav', ({ direction }) => {
-    const sidebar = document.getElementById('transcript-sidebar');
-    if (sidebar && !sidebar.classList.contains('open')) {
-      toggleTranscriptSidebar();
-    } else {
-      const m = $('#messages');
-      if (m) m.scrollBy({ top: direction === 'prev' ? -200 : 200, behavior: 'smooth' });
+    if (responseHistory.length === 0) return;
+    let changed = false;
+    if (direction === 'prev' && historyIndex > 0) {
+      historyIndex--;
+      changed = true;
+    } else if (direction === 'next' && historyIndex < responseHistory.length - 1) {
+      historyIndex++;
+      changed = true;
+    }
+    if (changed) {
+      renderHistoryItem(responseHistory[historyIndex]);
+      updateHistoryPill();
     }
   });
+
+  cue.on('session:directive', ({ directives, added, cleared }) => {
+    const badge = $('#directive-badge');
+    if (!badge) return;
+    if (cleared || !directives || directives.length === 0) {
+      badge.classList.add('hidden');
+      return;
+    }
+    const textEl = badge.querySelector('.directive-text');
+    const label = added || directives[directives.length - 1];
+    if (textEl) {
+      textEl.textContent = `Directive: "${label}"`;
+    }
+    badge.classList.remove('hidden');
+  });
+
+  const directiveClearBtn = $('#directive-clear-btn');
+  if (directiveClearBtn) {
+    directiveClearBtn.addEventListener('click', () => {
+      const badge = $('#directive-badge');
+      if (badge) badge.classList.add('hidden');
+      if (cue && cue.clearSessionDirectives) void cue.clearSessionDirectives();
+    });
+  }
 
   cue.on('transparency:toggle', () => {
     $('#app').classList.toggle('ultra-transparent');
