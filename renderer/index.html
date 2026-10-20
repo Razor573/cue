@@ -113,6 +113,7 @@
       <!-- Tab bar -->
       <div class="s-tabs">
         <button class="s-tab on" data-tab="keys">🔑 API Keys</button>
+        <button class="s-tab" data-tab="profile">👤 Profile</button>
         <button class="s-tab" data-tab="transcription">🔉 Audio</button>
         <button class="s-tab" data-tab="style">✨ Style</button>
         <button class="s-tab" data-tab="appearance">🌗 Appearance</button>
@@ -123,6 +124,7 @@
         <label class="s-label">Provider</label>
         <div class="s-seg" id="provider-seg">
           <button data-provider="publik" id="provider-publik" class="hidden">publik API <span class="s-default-badge">default</span></button>
+          <button data-provider="vertex" data-val="vertex">Vertex AI</button>
           <button data-provider="cerebras">Cerebras</button>
           <button data-provider="openai">OpenAI</button>
           <button data-provider="anthropic">Anthropic</button>
@@ -189,14 +191,102 @@
           <div class="s-field"><span>Endpoint</span><input id="azure-endpoint" type="text" placeholder="https://host.cognitiveservices.azure.com" autocomplete="off" /></div>
         </div>
 
-        <label class="s-label">Models <span class="s-hint">fast = Smart off · smart = Smart on</span></label>
-        <div class="s-field"><span>Fast</span><input id="model-fast" type="text" autocomplete="off" /></div>
-        <div class="s-field"><span>Smart</span><input id="model-smart" type="text" autocomplete="off" /></div>
+        <div id="vertex-row" class="vertex-card hidden">
+          <div class="vertex-card-head">
+            <span class="vertex-card-title">Google Cloud Vertex AI</span>
+            <span id="vertex-sa-status" class="vertex-badge">ADC fallback</span>
+          </div>
+          <div class="s-field">
+            <span>Project ID</span>
+            <input id="vertex-project" type="text" placeholder="my-gcp-project-id" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="s-field">
+            <span>Region</span>
+            <select id="vertex-location" class="s-select compact">
+              <option value="global">global (recommended)</option>
+              <option value="us-central1">us-central1</option>
+              <option value="europe-west2">europe-west2</option>
+              <option value="us-east5">us-east5</option>
+              <option value="europe-west1">europe-west1</option>
+              <option value="asia-northeast1">asia-northeast1</option>
+            </select>
+          </div>
+          <label class="s-label" for="vertex-sa-json">Service Account JSON <span class="s-hint">paste JSON key or leave blank for gcloud ADC</span></label>
+          <textarea id="vertex-sa-json" rows="3" spellcheck="false" placeholder="{ &quot;type&quot;: &quot;service_account&quot;, &quot;project_id&quot;: &quot;...&quot;, &quot;client_email&quot;: &quot;...&quot;, &quot;private_key&quot;: &quot;...&quot; }"></textarea>
+          <div class="vertex-sa-actions">
+            <span class="s-note">Auto-extracts Project ID and signs RS256 OAuth tokens locally.</span>
+            <button id="vertex-sa-clear" type="button" class="s-action">Clear saved key</button>
+          </div>
+          <div class="s-field">
+            <span>Thinking</span>
+            <div class="s-seg" id="vertex-thinking" style="flex:1;">
+              <button type="button" data-thinking="LOW" class="on">Low</button>
+              <button type="button" data-thinking="MEDIUM">Medium</button>
+              <button type="button" data-thinking="HIGH">High</button>
+            </div>
+          </div>
+          <div class="s-field">
+            <span>Search</span>
+            <label class="s-note" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input id="vertex-web-search" type="checkbox" style="width:auto;" />
+              Enable Google Search grounding
+            </label>
+          </div>
+        </div>
+
+        <div class="model-row-head">
+          <label class="s-label" style="margin:0;">Models <span class="s-hint">fast = Smart off · smart = Smart on</span></label>
+          <div class="model-controls-right">
+            <span id="models-live-badge" class="models-live-badge">Curated</span>
+            <button id="refresh-models-btn" type="button" class="s-action">↻ Refresh models</button>
+          </div>
+        </div>
+        <div class="model-slot-group">
+          <div class="s-field">
+            <span>Fast</span>
+            <select id="model-fast-select" class="s-select compact"></select>
+          </div>
+          <div class="s-field" id="model-fast-custom-row">
+            <span>Fast ID</span>
+            <input id="model-fast" type="text" placeholder="e.g. gemini-3.8-flash" autocomplete="off" />
+          </div>
+        </div>
+        <div class="model-slot-group">
+          <div class="s-field">
+            <span>Smart</span>
+            <select id="model-smart-select" class="s-select compact"></select>
+          </div>
+          <div class="s-field" id="model-smart-custom-row">
+            <span>Smart ID</span>
+            <input id="model-smart" type="text" placeholder="e.g. gemini-4-argon" autocomplete="off" />
+          </div>
+        </div>
+
+        <div class="test-conn-bar">
+          <button id="test-connection-btn" type="button" class="s-action primary">⚡ Test Connection</button>
+          <div id="test-connection-status" class="test-conn-status">Verify your current provider key &amp; selected model</div>
+        </div>
 
         <label class="s-label">Assistant access <span class="s-hint">programs allowed to see what cue is doing</span></label>
         <div class="s-callers" id="applink-callers"></div>
 
         <div class="s-status" id="s-status"></div>
+      </div>
+
+      <!-- Tab: Profile & Interview Prep -->
+      <div class="s-body s-tab-pane hidden" id="tab-profile" data-pane="profile">
+        <div class="profile-import-bar">
+          <label class="s-label" for="profile-resume" style="margin:0;">Résumé / CV <span class="s-hint">grounds answers in your real experience</span></label>
+          <button id="profile-import-btn" type="button" class="s-action">Import PDF / DOCX / TXT…</button>
+        </div>
+        <div id="profile-import-status" class="s-note"></div>
+        <textarea id="profile-resume" rows="5" spellcheck="false" placeholder="Paste your résumé text here or import a PDF/DOCX/TXT file…"></textarea>
+
+        <label class="s-label" for="profile-jd">Target Job Description <span class="s-hint">tailors responses to the role</span></label>
+        <textarea id="profile-jd" rows="4" spellcheck="false" placeholder="Paste the job description or key role requirements…"></textarea>
+
+        <label class="s-label" for="profile-star">STAR Stories &amp; Key Achievements <span class="s-hint">injected on behavioral questions</span></label>
+        <textarea id="profile-star" rows="4" spellcheck="false" placeholder="3-5 bulleted STAR stories or metrics you want cue to draw from…"></textarea>
       </div>
 
       <!-- Tab: Transcription -->

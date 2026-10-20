@@ -5,7 +5,8 @@ const store = require('./src/store');
 const { captureScreenshot } = require('./src/screen');
 const { createSTT } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
-const { createLLM } = require('./src/llm');
+const { createLLM, listProviderModels, testProviderConnection } = require('./src/llm');
+const { validateServiceAccountJson } = require('./src/vertex-ai');
 const { MODES } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
@@ -883,6 +884,16 @@ async function runFeature(mode, userText) {
 // Redact on the way out, strip on the way in: the publik key never enters the
 // renderer, and the renderer's whole-object Save can never clobber it.
 ipcMain.handle('settings:get', () => store.redactForRenderer(store.getSettings()));
+ipcMain.handle('models:list', async (_e, params = {}) => listProviderModels(store.getSettings(), params || {}));
+ipcMain.handle('llm:test-connection', async (_e, params = {}) => testProviderConnection(store.getSettings(), params || {}));
+ipcMain.handle('vertex:parse-sa', async (_e, rawJson) => {
+  try {
+    const res = validateServiceAccountJson(rawJson);
+    return { ok: true, projectId: res.projectId, clientEmail: res.clientEmail };
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || String(err) };
+  }
+});
 ipcMain.handle('settings:set', (_e, patch) => {
   sttDisabled = false;
   const next = store.setSettings(store.stripRendererPatch(patch));
@@ -1173,7 +1184,7 @@ ipcMain.on('log', (_e, msg) => console.log('[renderer]', msg));
 async function pickAndParseDocument() {
   const res = await dialog.showOpenDialog(win, {
     properties: ['openFile'],
-    filters: [{ name: 'Resume / Job description', extensions: ['pdf', 'docx'] }]
+    filters: [{ name: 'Resume / Job description', extensions: ['pdf', 'docx', 'txt', 'md'] }]
   });
   if (res.canceled || !res.filePaths.length) return null;
   const filePath = res.filePaths[0];

@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { EventEmitter } = require('node:events');
+const Module = require('node:module');
 
 // Stand-in for the `ws` package: starts CONNECTING, and — like the real thing —
 // closing it mid-handshake emits an 'error' ("closed before the connection was
@@ -27,7 +28,21 @@ class FakeWebSocket extends EventEmitter {
   }
   open() { this.readyState = 1; this.emit('open'); }
 }
-const wsPath = require.resolve('ws');
+let wsPath;
+try {
+  wsPath = require.resolve('ws');
+} catch (err) {
+  if (err && err.code === 'MODULE_NOT_FOUND') {
+    wsPath = '__virtual_ws__';
+    const origResolveFilename = Module._resolveFilename;
+    Module._resolveFilename = function (request, parent, isMain, options) {
+      if (request === 'ws') return wsPath;
+      return origResolveFilename.call(this, request, parent, isMain, options);
+    };
+  } else {
+    throw err;
+  }
+}
 require.cache[wsPath] = { id: wsPath, filename: wsPath, loaded: true, exports: FakeWebSocket };
 const { DeepgramStreamingSTT, OpenAIRealtimeSTT } = require('../src/stt-streaming');
 

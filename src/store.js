@@ -4,11 +4,16 @@
 // recovery, 0600 permissions) live in ./settings-store-core so they can be
 // unit tested without Electron; this file owns the schema, defaults and
 // public surface (getSettings/setSettings/etc.) as before.
-const { app } = require('electron');
+let app = null;
+try {
+  ({ app } = require('electron'));
+} catch {
+  // Running in plain Node test environment without Electron runtime
+}
 const { createFileStore } = require('./settings-store-core');
 const { normalizeBaseUrl } = require('./openai-compatible');
 
-const fileStore = createFileStore(() => app.getPath('userData'), 'cue-data.json');
+const fileStore = createFileStore(() => (app ? app.getPath('userData') : require('os').tmpdir()), 'cue-data.json');
 
 // Cap on the user's custom response rules. Generous but bounded: anything longer
 // should live in a real prompt file, not in a settings field.
@@ -32,8 +37,12 @@ const DEFAULTS = {
   meetingAudio: process.platform !== 'darwin',
   baseUrl: '',
   minimaxRegion: 'global_en',
-  apiKeys: { cerebras: '', openai: '', anthropic: '', gemini: '', deepgram: '', custom: '', ollama: '', groq: '', minimax: '', deepseek: '', azure: '', publik: '' },
+  apiKeys: { cerebras: '', openai: '', anthropic: '', gemini: '', vertex: '', deepgram: '', custom: '', ollama: '', groq: '', minimax: '', deepseek: '', azure: '', publik: '' },
   azureEndpoint: '',
+  vertexProject: '',
+  vertexLocation: 'global',
+  vertexThinkingLevel: 'LOW',
+  vertexWebSearch: false,
   // publik API (packaged-build default). apiKeys.publik holds the minted key;
   // everything here is state the main process owns — the renderer only reads
   // a redacted view of it through publik:state and can never write it.
@@ -103,6 +112,7 @@ const DEFAULTS = {
     // gemini-2.0-flash (the original default here) was retired by Google on
     // 2026-03-03 and 404s on every request. smart is the newest Pro release.
     gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-preview' },
+    vertex: { fast: 'gemini-3.8-flash', smart: 'gemini-4-argon' },
     custom: { fast: '', smart: '' },
     ollama: { fast: 'llama3.2', smart: 'llama3.3' },
     groq: { fast: 'llama-3.1-8b-instant', smart: 'llama-3.3-70b-versatile' },
@@ -183,8 +193,9 @@ function applyPublikDefault(build) {
   const current = data.provider;
   const hasOwnKey = !!(data.apiKeys && data.apiKeys[current]);
   const hasCustomEndpoint = current === 'custom' && !!data.baseUrl;
+  const hasVertexProject = current === 'vertex' && !!data.vertexProject;
   data.publik = { ...data.publik, defaultApplied: true };
-  if (hasOwnKey || hasCustomEndpoint) { save(); return false; }
+  if (hasOwnKey || hasCustomEndpoint || hasVertexProject) { save(); return false; }
   data.provider = 'publik';
   save();
   return true;
@@ -199,14 +210,30 @@ function stripRendererPatch(patch) {
 
 // What the renderer gets from settings:get: the same object minus the key.
 function redactForRenderer(s) {
+  let vertexKeyEmail = '';
+  const rawVertex = s && s.apiKeys && s.apiKeys.vertex;
+  if (rawVertex && typeof rawVertex === 'string' && rawVertex.trim()) {
+    try {
+      const parsed = JSON.parse(rawVertex);
+      if (parsed && typeof parsed.client_email === 'string') {
+        vertexKeyEmail = parsed.client_email.trim();
+      }
+    } catch (_) {}
+  }
+  const hasKey = Object.fromEntries(
+    Object.entries((s && s.apiKeys) || {}).map(([k, v]) => [k, Boolean(v && String(v).trim())])
+  );
   return {
     ...s,
     apiKeys: { ...(s.apiKeys || {}), publik: '' },
+    hasKey,
+    vertexKeyEmail,
     publik: { ...(s.publik || {}), connected: !!(s.apiKeys && s.apiKeys.publik) }
   };
 }
 
 module.exports = {
+  DEFAULTS,
   MAX_AI_RULES_CHARS,
   MIN_OPACITY,
   MAX_OPACITY,

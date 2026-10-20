@@ -1365,7 +1365,294 @@
     if (minimaxRegionSettings) minimaxRegionSettings.classList.toggle('hidden', provider !== 'minimax');
     const azureEndpointSettings = $('#azure-endpoint-settings');
     if (azureEndpointSettings) azureEndpointSettings.classList.toggle('hidden', provider !== 'azure');
+    const vertexRow = $('#vertex-row');
+    if (vertexRow) vertexRow.classList.toggle('hidden', provider !== 'vertex');
     renderPublikBlock();
+  }
+
+  let vertexKeyCleared = false;
+
+  function getTypedProviderKey(provider) {
+    if (provider === 'vertex') {
+      const saEl = $('#vertex-sa-json');
+      return saEl ? saEl.value.trim() : '';
+    }
+    const inputEl = document.getElementById('key-' + provider);
+    return inputEl ? inputEl.value.trim() : '';
+  }
+
+  function updateVertexStatusBadge() {
+    const badge = $('#vertex-sa-status');
+    if (!badge || !settings) return;
+    badge.classList.remove('ok', 'warn');
+    const typedSa = ($('#vertex-sa-json') && $('#vertex-sa-json').value.trim()) || '';
+    if (typedSa) {
+      badge.textContent = 'Validating key…';
+      return;
+    }
+    const savedSa = !vertexKeyCleared && ((settings.apiKeys && settings.apiKeys.vertex) || (settings.hasKey && settings.hasKey.vertex));
+    if (savedSa) {
+      const email = settings.vertexKeyEmail ? ` · ${settings.vertexKeyEmail}` : '';
+      badge.textContent = `Service account saved${email}`;
+      badge.classList.add('ok');
+    } else {
+      badge.textContent = 'Using gcloud ADC fallback';
+    }
+  }
+
+  const vertexSaInput = $('#vertex-sa-json');
+  if (vertexSaInput) {
+    vertexSaInput.addEventListener('input', async () => {
+      const raw = vertexSaInput.value.trim();
+      const badge = $('#vertex-sa-status');
+      if (!raw) {
+        updateVertexStatusBadge();
+        return;
+      }
+      vertexKeyCleared = false;
+      if (cue.parseVertexServiceAccount) {
+        const parsed = await cue.parseVertexServiceAccount(raw);
+        if (!badge) return;
+        badge.classList.remove('ok', 'warn');
+        if (parsed && parsed.ok) {
+          badge.textContent = `Valid SA · ${parsed.clientEmail}`;
+          badge.classList.add('ok');
+          const projInput = $('#vertex-project');
+          if (projInput && !projInput.value.trim() && parsed.projectId) {
+            projInput.value = parsed.projectId;
+          }
+        } else {
+          badge.textContent = (parsed && parsed.error) || 'Invalid Service Account JSON';
+          badge.classList.add('warn');
+        }
+      }
+    });
+  }
+
+  const vertexSaClearBtn = $('#vertex-sa-clear');
+  if (vertexSaClearBtn) {
+    vertexSaClearBtn.addEventListener('click', () => {
+      vertexKeyCleared = true;
+      if ($('#vertex-sa-json')) $('#vertex-sa-json').value = '';
+      if (settings && settings.apiKeys) settings.apiKeys.vertex = '';
+      if (settings) settings.vertexKeyEmail = '';
+      updateVertexStatusBadge();
+    });
+  }
+
+  document.querySelectorAll('#vertex-thinking button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!settings) return;
+      settings.vertexThinkingLevel = btn.dataset.thinking || 'LOW';
+      document.querySelectorAll('#vertex-thinking button').forEach((b) => b.classList.toggle('on', b === btn));
+    });
+  });
+
+  function populateModelSelects(catalog, currentFast, currentSmart) {
+    const fastSelect = $('#model-fast-select');
+    const smartSelect = $('#model-smart-select');
+    const fastInput = $('#model-fast');
+    const smartInput = $('#model-smart');
+    if (!fastSelect || !smartSelect || !fastInput || !smartInput) return;
+
+    const fastList = (catalog && catalog.fastModels && catalog.fastModels.length)
+      ? catalog.fastModels
+      : ((catalog && catalog.models) || []);
+    const smartList = (catalog && catalog.smartModels && catalog.smartModels.length)
+      ? catalog.smartModels
+      : ((catalog && catalog.models) || []);
+
+    const fillOne = (selectEl, inputEl, options, currentVal) => {
+      selectEl.innerHTML = '';
+      const seen = new Set();
+      for (const opt of options) {
+        const id = typeof opt === 'string' ? opt : opt.id;
+        const label = typeof opt === 'string' ? opt : (opt.label || opt.id);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = label === id ? id : `${label} — ${id}`;
+        selectEl.appendChild(o);
+      }
+      const customOpt = document.createElement('option');
+      customOpt.value = '__custom__';
+      customOpt.textContent = 'Custom model ID…';
+      selectEl.appendChild(customOpt);
+
+      const trimmed = String(currentVal || '').trim();
+      if (trimmed && seen.has(trimmed)) {
+        selectEl.value = trimmed;
+        inputEl.value = trimmed;
+      } else if (!trimmed && options.length > 0) {
+        const firstId = typeof options[0] === 'string' ? options[0] : options[0].id;
+        selectEl.value = firstId;
+        inputEl.value = firstId;
+      } else {
+        selectEl.value = '__custom__';
+        inputEl.value = trimmed;
+      }
+    };
+
+    fillOne(fastSelect, fastInput, fastList, currentFast);
+    fillOne(smartSelect, smartInput, smartList, currentSmart);
+  }
+
+  async function refreshModelDropdowns(isManual = false) {
+    if (!settings || !cue.listModels) return;
+    const badge = $('#models-live-badge');
+    const refreshBtn = $('#refresh-models-btn');
+    if (isManual && refreshBtn) refreshBtn.disabled = true;
+    if (badge && isManual) badge.textContent = 'Loading…';
+    try {
+      const provider = settings.provider;
+      const res = await cue.listModels({
+        provider,
+        apiKey: getTypedProviderKey(provider),
+        clearKey: provider === 'vertex' && vertexKeyCleared,
+        vertexProject: ($('#vertex-project') && $('#vertex-project').value.trim()) || settings.vertexProject || '',
+        vertexLocation: ($('#vertex-location') && $('#vertex-location').value) || settings.vertexLocation || 'global',
+        ollamaHost: ($('#key-ollama') && $('#key-ollama').value.trim()) || ''
+      });
+      const currentFast = ($('#model-fast') && $('#model-fast').value.trim()) || ((settings.models[provider] || {}).fast || '');
+      const currentSmart = ($('#model-smart') && $('#model-smart').value.trim()) || ((settings.models[provider] || {}).smart || '');
+      populateModelSelects(res, currentFast, currentSmart);
+      if (badge) {
+        badge.classList.toggle('live', !!res.live);
+        badge.textContent = res.live ? `Live (${(res.models || []).length})` : 'Curated';
+        badge.title = res.warning || '';
+      }
+    } catch (err) {
+      if (badge) {
+        badge.classList.remove('live');
+        badge.textContent = 'Curated';
+      }
+    } finally {
+      if (isManual && refreshBtn) refreshBtn.disabled = false;
+    }
+  }
+
+  const fastSelectEl = $('#model-fast-select');
+  if (fastSelectEl) {
+    fastSelectEl.addEventListener('change', () => {
+      if (fastSelectEl.value !== '__custom__') {
+        $('#model-fast').value = fastSelectEl.value;
+        if (settings && settings.models && settings.models[settings.provider]) {
+          settings.models[settings.provider].fast = fastSelectEl.value;
+        }
+        updateSmartTooltip();
+      } else {
+        $('#model-fast').focus();
+      }
+    });
+  }
+  const smartSelectEl = $('#model-smart-select');
+  if (smartSelectEl) {
+    smartSelectEl.addEventListener('change', () => {
+      if (smartSelectEl.value !== '__custom__') {
+        $('#model-smart').value = smartSelectEl.value;
+        if (settings && settings.models && settings.models[settings.provider]) {
+          settings.models[settings.provider].smart = smartSelectEl.value;
+        }
+        updateSmartTooltip();
+      } else {
+        $('#model-smart').focus();
+      }
+    });
+  }
+  const fastInputEl = $('#model-fast');
+  if (fastInputEl && fastSelectEl) {
+    fastInputEl.addEventListener('input', () => {
+      const val = fastInputEl.value.trim();
+      const match = Array.from(fastSelectEl.options).some((o) => o.value === val && o.value !== '__custom__');
+      fastSelectEl.value = match ? val : '__custom__';
+    });
+  }
+  const smartInputEl = $('#model-smart');
+  if (smartInputEl && smartSelectEl) {
+    smartInputEl.addEventListener('input', () => {
+      const val = smartInputEl.value.trim();
+      const match = Array.from(smartSelectEl.options).some((o) => o.value === val && o.value !== '__custom__');
+      smartSelectEl.value = match ? val : '__custom__';
+    });
+  }
+  const refreshModelsBtn = $('#refresh-models-btn');
+  if (refreshModelsBtn) {
+    refreshModelsBtn.addEventListener('click', () => { void refreshModelDropdowns(true); });
+  }
+
+  async function runConnectionTest() {
+    if (!settings || !cue.testConnection) return;
+    const btn = $('#test-connection-btn');
+    const statusEl = $('#test-connection-status');
+    if (!btn || !statusEl) return;
+
+    const provider = settings.provider;
+    btn.disabled = true;
+    statusEl.className = 'test-conn-status testing';
+    statusEl.textContent = `Testing ${provider} connection…`;
+
+    try {
+      const res = await cue.testConnection({
+        provider,
+        apiKey: getTypedProviderKey(provider),
+        clearKey: provider === 'vertex' && vertexKeyCleared,
+        baseUrl: ($('#base-url') && $('#base-url').value.trim()) || '',
+        azureEndpoint: ($('#azure-endpoint') && $('#azure-endpoint').value.trim()) || '',
+        ollamaHost: ($('#key-ollama') && $('#key-ollama').value.trim()) || '',
+        minimaxRegion: settings.minimaxRegion || 'global_en',
+        vertexProject: ($('#vertex-project') && $('#vertex-project').value.trim()) || '',
+        vertexLocation: ($('#vertex-location') && $('#vertex-location').value) || 'global',
+        vertexThinkingLevel: settings.vertexThinkingLevel || 'LOW',
+        vertexWebSearch: !!($('#vertex-web-search') && $('#vertex-web-search').checked),
+        fastModel: ($('#model-fast') && $('#model-fast').value.trim()) || '',
+        smartModel: ($('#model-smart') && $('#model-smart').value.trim()) || ''
+      });
+
+      if (res && res.ok) {
+        statusEl.className = 'test-conn-status ok';
+        const regionPart = res.region ? ` (${res.region})` : '';
+        const countPart = res.modelCount ? ` · ${res.modelCount} models` : '';
+        statusEl.textContent = `Connected · ${res.model}${regionPart}${countPart} · "${res.reply || 'OK'}" · ${res.latencyMs}ms`;
+      } else {
+        statusEl.className = 'test-conn-status err';
+        statusEl.textContent = (res && res.error) || 'Connection failed.';
+      }
+    } catch (err) {
+      statusEl.className = 'test-conn-status err';
+      statusEl.textContent = (err && err.message) || String(err);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  const testConnBtn = $('#test-connection-btn');
+  if (testConnBtn) {
+    testConnBtn.addEventListener('click', () => { void runConnectionTest(); });
+  }
+
+  const profileImportBtn = $('#profile-import-btn');
+  if (profileImportBtn) {
+    profileImportBtn.addEventListener('click', async () => {
+      if (!cue.pickProfileDocument) return;
+      const statusEl = $('#profile-import-status');
+      profileImportBtn.disabled = true;
+      try {
+        const res = await cue.pickProfileDocument();
+        if (res && !res.canceled) {
+          if (res.error) {
+            if (statusEl) statusEl.textContent = `Import error: ${res.error}`;
+          } else if (typeof res.text === 'string') {
+            if ($('#profile-resume')) $('#profile-resume').value = res.text;
+            if (statusEl) statusEl.textContent = `Imported ${res.fileName || 'document'} (${res.text.length} chars)`;
+          }
+        }
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `Import failed: ${(err && err.message) || String(err)}`;
+      } finally {
+        profileImportBtn.disabled = false;
+      }
+    });
   }
 
   // ---- publik API (packaged-build default) --------------------------------
@@ -1475,10 +1762,24 @@
     document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.classList.toggle('on', b.dataset.region === (settings.minimaxRegion || 'global_en')));
     $('#key-azure').value = settings.apiKeys.azure || '';
     $('#azure-endpoint').value = settings.azureEndpoint || '';
+    vertexKeyCleared = false;
+    if ($('#vertex-project')) $('#vertex-project').value = settings.vertexProject || '';
+    if ($('#vertex-location')) $('#vertex-location').value = settings.vertexLocation || 'global';
+    if ($('#vertex-sa-json')) $('#vertex-sa-json').value = '';
+    if ($('#vertex-web-search')) $('#vertex-web-search').checked = !!settings.vertexWebSearch;
+    document.querySelectorAll('#vertex-thinking button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.thinking === (settings.vertexThinkingLevel || 'LOW'));
+    });
+    updateVertexStatusBadge();
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    void refreshModelDropdowns(false);
     fillAppLinkCallers();
     $('#s-status').textContent = statusText();
+    // Profile tab
+    if ($('#profile-resume')) $('#profile-resume').value = settings.resumeText || '';
+    if ($('#profile-jd')) $('#profile-jd').value = settings.jobDescription || '';
+    if ($('#profile-star')) $('#profile-star').value = settings.starStories || '';
     // Transcription tab
     document.querySelectorAll('#meeting-audio-seg button').forEach((button) => {
       button.classList.toggle('on', (button.dataset.meetingAudio === 'on') === !!settings.meetingAudio);
@@ -1546,7 +1847,7 @@
 
   function statusText() {
     const k = settings.apiKeys;
-    const labels = { publik: 'publik API', cerebras: 'Cerebras', openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', deepgram: 'Deepgram', custom: 'Custom', ollama: 'Ollama', groq: 'Groq', minimax: 'MiniMax', deepseek: 'DeepSeek', azure: 'Azure AI Foundry' };
+    const labels = { publik: 'publik API', vertex: 'Vertex AI', cerebras: 'Cerebras', openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', deepgram: 'Deepgram', custom: 'Custom', ollama: 'Ollama', groq: 'Groq', minimax: 'MiniMax', deepseek: 'DeepSeek', azure: 'Azure AI Foundry' };
     const has = Object.keys(labels).filter((p) => k[p]).map((p) => labels[p]);
     const publikPart = settings.provider === 'publik' && publikState
       ? ` · ${publikState.connected ? (publikState.balanceLabel ? `balance ${publikState.balanceLabel}` : 'connected') : 'not set up'}`
@@ -1565,6 +1866,7 @@
     updateCustomProviderFields();
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    void refreshModelDropdowns(false);
     $('#s-status').textContent = statusText();
     updateSmartTooltip();
   }));
@@ -1742,6 +2044,16 @@
     settings.apiKeys.deepseek = $('#key-deepseek').value.trim();
     settings.apiKeys.azure = $('#key-azure').value.trim();
     settings.azureEndpoint = $('#azure-endpoint').value.trim();
+    if ($('#vertex-project')) settings.vertexProject = $('#vertex-project').value.trim();
+    if ($('#vertex-location')) settings.vertexLocation = $('#vertex-location').value || 'global';
+    if ($('#vertex-web-search')) settings.vertexWebSearch = !!$('#vertex-web-search').checked;
+    const typedVertexSa = ($('#vertex-sa-json') && $('#vertex-sa-json').value.trim()) || '';
+    if (typedVertexSa) {
+      settings.apiKeys.vertex = typedVertexSa;
+      vertexKeyCleared = false;
+    } else if (vertexKeyCleared) {
+      settings.apiKeys.vertex = '';
+    }
     if (!settings.models[settings.provider]) settings.models[settings.provider] = {};
     settings.models[settings.provider].fast = $('#model-fast').value.trim();
     settings.models[settings.provider].smart = $('#model-smart').value.trim();
@@ -1751,11 +2063,15 @@
     // this, `settings.provider` stays on its default ('openai') forever and
     // cue keeps reporting itself unconfigured even though a valid key was
     // saved for the provider the user actually meant to use.
-    if (!settings.apiKeys[settings.provider]) {
-      const keyedProviders = ['cerebras', 'openai', 'anthropic', 'gemini', 'groq', 'minimax', 'deepseek', 'azure'];
+    if (!settings.apiKeys[settings.provider] && !(settings.provider === 'vertex' && settings.vertexProject)) {
+      const keyedProviders = ['vertex', 'cerebras', 'openai', 'anthropic', 'gemini', 'groq', 'minimax', 'deepseek', 'azure'];
       const justFilled = keyedProviders.find((p) => settings.apiKeys[p]);
       if (justFilled) settings.provider = justFilled;
     }
+    // Profile tab
+    if ($('#profile-resume')) settings.resumeText = $('#profile-resume').value.trim();
+    if ($('#profile-jd')) settings.jobDescription = $('#profile-jd').value.trim();
+    if ($('#profile-star')) settings.starStories = $('#profile-star').value.trim();
     // Transcription
     if (!settings.localWhisper) settings.localWhisper = {};
     settings.localWhisper.modelId = $('#whisper-model').value || settings.localWhisper.modelId || 'base.en';
