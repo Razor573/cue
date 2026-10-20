@@ -208,7 +208,7 @@ describe('Unit 1: src/vertex-ai.js core engine', () => {
     assert.equal(requestedUrls.length, 2);
     assert.match(requestedUrls[0], /europe-west1-aiplatform\.googleapis\.com/);
     assert.match(requestedUrls[1], /aiplatform\.googleapis\.com\/v1beta1\/projects\/cue-vertex-prod\/locations\/global/);
-    assert.deepEqual(capturedBodies[0].generationConfig.thinkingConfig, { thinkingLevel: 'MEDIUM' });
+    assert.deepEqual(capturedBodies[0].generationConfig.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true });
     assert.deepEqual(capturedBodies[0].tools, [{ googleSearch: {} }]);
   });
 });

@@ -355,6 +355,7 @@
     caretEl.className = 'ai-caret';
     aiEl.appendChild(caretEl);
     messages.appendChild(aiEl);
+    messages.scrollTop = 0;
   }
 
   function appendToken(t) {
@@ -383,7 +384,6 @@
         renderScheduled = false;
         if (aiEl) {
           aiEl.innerHTML = renderMarkdown(streamedText);
-          messages.scrollTop = messages.scrollHeight;
         }
       });
     }
@@ -1307,6 +1307,10 @@
   function clearTranscriptSidebar() {
     const list = document.getElementById('ts-list');
     if (list) list.innerHTML = '<div class="ts-placeholder">Conversation history will appear here when listening.</div>';
+    const turnsEl = document.getElementById('live-transcript-turns');
+    if (turnsEl) turnsEl.innerHTML = '';
+    const bubble = document.getElementById('live-interim-bubble');
+    if (bubble) { bubble.innerHTML = ''; bubble.classList.add('hidden'); }
     tsSidebarInterimEl = null;
     tsLastRow.you = null; tsLastRow.them = null;
     clearTimeout(tsRowTimer.you); clearTimeout(tsRowTimer.them);
@@ -1384,6 +1388,12 @@
     el.textContent = `${label}: ${text}`;
     el.classList.add('show');
     appendTranscriptHistoryTurn(channel, text, true); // update sidebar interim
+
+    const bubble = document.getElementById('live-interim-bubble');
+    if (bubble) {
+      bubble.innerHTML = `<span class="speaker-tag ${channel}">${channel === 'them' ? 'Them' : 'You'}:</span> <span class="interim-text">${esc(text)}</span>`;
+      bubble.classList.remove('hidden');
+    }
     
     // FIX #12: Show interviewer's interim speech in input area
     if (channel === 'them' && !input.value.trim()) {
@@ -1394,6 +1404,11 @@
     setLiveDotState('idle');
     // Clear interim when we get a final
     if (interimEl) { interimEl.textContent = ''; interimEl.classList.remove('show'); }
+    const bubble = document.getElementById('live-interim-bubble');
+    if (bubble) {
+      bubble.classList.add('hidden');
+      bubble.innerHTML = '';
+    }
     clearTranscriptInterim();
     clearInputInterim(); // FIX #12: Clear interim text from input area
     // sidebar: the final turn is added via the 'transcript' event below
@@ -1516,7 +1531,6 @@
     if (bodyEl) {
       bodyEl.scrollTop = bodyEl.scrollHeight;
     }
-    messages.scrollTop = messages.scrollHeight;
   });
   cue.on('llm:token', ({ text }) => appendToken(text));
   cue.on('llm:done', ({ aborted } = {}) => {
@@ -1553,6 +1567,16 @@
   });
   cue.on('transcript', ({ channel, text }) => {
     if (!text || text.trim().length < 2 || /^[?!.,;:\-…]+$/.test(text.trim())) return;
+    const turnsEl = document.getElementById('live-transcript-turns');
+    if (turnsEl) {
+      const turnEl = document.createElement('div');
+      turnEl.className = `live-turn live-turn-${channel}`;
+      turnEl.innerHTML = `<span class="speaker-tag ${channel}">${channel === 'them' ? 'Them' : 'You'}</span> <span class="turn-text">${esc(text)}</span>`;
+      turnsEl.appendChild(turnEl);
+      while (turnsEl.children.length > 4) {
+        turnsEl.removeChild(turnsEl.firstChild);
+      }
+    }
     appendTranscriptHistoryTurn(channel, text, false);
     // Auto-fill the input box with Them (interviewer) speech
     if (channel === 'them') {
@@ -1660,6 +1684,7 @@
   // ---- settings ----------------------------------------------------------
   const scrim = $('#settings-scrim');
   function openSettings() {
+    if ($('#session-instructions')) $('#session-instructions').value = settings.sessionInstructions || '';
     fillSettings();
     scrim.classList.remove('hidden');
     refreshWhisperModels();
@@ -2163,6 +2188,7 @@
     const slidesInterval = $('#slides-interval');
     if (slidesInterval) slidesInterval.value = slidesCfg.intervalMs || 3000;
     // Style tab
+    if ($('#session-instructions')) $('#session-instructions').value = settings.sessionInstructions || '';
     $('#ai-rules').value = settings.aiRules || '';
     updateAiRulesCounter();
     // Appearance tab
@@ -2484,6 +2510,7 @@
       settings.slides.intervalMs = Math.max(1500, Math.min(15000, v));
     }
     // Style tab
+    if ($('#session-instructions')) settings.sessionInstructions = $('#session-instructions').value;
     settings.aiRules = $('#ai-rules').value.trim();
     // Appearance tab
     const opacitySlider = $('#s-opacity-slider');
@@ -2937,6 +2964,19 @@
   const directiveClearBtn = $('#directive-clear-btn');
   if (directiveClearBtn) {
     directiveClearBtn.addEventListener('click', () => {
+      const badge = $('#directive-badge');
+      if (badge) badge.classList.add('hidden');
+      if (cue && cue.clearSessionDirectives) void cue.clearSessionDirectives();
+    });
+  }
+
+  const clearSessionInstructionsBtn = $('#clear-session-instructions-btn');
+  if (clearSessionInstructionsBtn) {
+    clearSessionInstructionsBtn.addEventListener('click', async () => {
+      const el = $('#session-instructions');
+      if (el) el.value = '';
+      settings.sessionInstructions = '';
+      await saveSettings();
       const badge = $('#directive-badge');
       if (badge) badge.classList.add('hidden');
       if (cue && cue.clearSessionDirectives) void cue.clearSessionDirectives();

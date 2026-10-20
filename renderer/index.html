@@ -62,6 +62,11 @@
             </div>
             <div id="messages"></div>
 
+            <div id="live-transcript-feed" class="live-transcript-feed">
+              <div id="live-transcript-turns" class="live-transcript-turns"></div>
+              <div id="live-interim-bubble" class="live-interim-bubble hidden"></div>
+            </div>
+
             <div id="action-row">
               <button class="act act-primary" data-mode="say"
                 title="Suggests what to say next based on the conversation">
@@ -398,6 +403,14 @@
 
       <!-- Tab: Style -->
       <div class="s-body s-tab-pane hidden" data-pane="style">
+        <div class="session-instructions-block">
+          <div class="section-head-with-action">
+            <label class="s-label" for="session-instructions" style="margin:0;">Session instructions <span class="s-hint">temporary steering for this specific meeting or task</span></label>
+            <button id="clear-session-instructions-btn" type="button" class="s-action danger btn-xs">Clear session</button>
+          </div>
+          <textarea id="session-instructions" rows="4" spellcheck="false" placeholder="e.g. This time give me the full script so I can talk about this for 2 minutes...&#10;- Or: In this assessment give me best and second best."></textarea>
+          <div class="s-note">Applied immediately to all answers in this session. Unlike permanent AI rules, these can be set or cleared anytime for a specific interview, assessment, or presentation.</div>
+        </div>
         <label class="s-label">AI rules <span class="s-hint">how the AI should write its responses</span></label>
         <textarea id="ai-rules" rows="10" spellcheck="false" placeholder="e.g.
 - Never use em-dashes.

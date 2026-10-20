@@ -856,10 +856,17 @@ async function runFeature(mode, userText) {
 
     const settingsForPrompt = store.getSettings();
     let contextBlock = buildInterviewContext(settingsForPrompt, mode, transcript);
-    if (sessionDirectives.length > 0) {
-      contextBlock = (contextBlock ? contextBlock + '\n\n' : '') +
-        'ACTIVE SESSION DIRECTIVES (MUST FOLLOW FOR ALL RESPONSES):\n' +
-        sessionDirectives.map(d => `- ${d}`).join('\n');
+    const activeInstructions = [
+      settingsForPrompt.sessionInstructions?.trim(),
+      ...sessionDirectives
+    ].filter(Boolean);
+
+    if (activeInstructions.length > 0) {
+      // ACTIVE SESSION DIRECTIVES (MUST FOLLOW FOR ALL RESPONSES):
+      // sessionDirectives.map
+      const directivesBlock = 'ACTIVE SESSION DIRECTIVES & INSTRUCTIONS (MUST FOLLOW FOR ALL RESPONSES):\n' +
+        activeInstructions.map(d => `- ${d}`).join('\n');
+      contextBlock = contextBlock ? contextBlock + '\n\n' + directivesBlock : directivesBlock;
     }
     // Summaries of the last few meetings, so "what did we agree last time?"
     // has something to draw on. Never the current meeting, never leetcode.

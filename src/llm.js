@@ -527,12 +527,15 @@ function geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, we
     systemInstruction: system,
     maxOutputTokens: maxTokens + (thinking ? GEMINI_THINKING_HEADROOM.smart : GEMINI_THINKING_HEADROOM.fast)
   };
-  if (thinkingLevel) {
+  if (includeThoughts) {
+    config.thinkingConfig = {
+      thinkingLevel: thinkingLevel ? String(thinkingLevel).toLowerCase() : (thinking ? 'medium' : 'low'),
+      includeThoughts: true
+    };
+  } else if (thinkingLevel) {
     config.thinkingConfig = { thinkingLevel: String(thinkingLevel).toLowerCase() };
-    if (includeThoughts) config.thinkingConfig.includeThoughts = true;
   } else if (!thinking) {
     config.thinkingConfig = { thinkingLevel: 'low' };
-    if (includeThoughts) config.thinkingConfig.includeThoughts = true;
   }
   if (webSearch) {
     config.tools = [{ googleSearch: {} }];
@@ -552,7 +555,7 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
     }
     return { role: t.role === 'assistant' ? 'model' : 'user', parts };
   });
-  const config = geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch });
+  const config = geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch, includeThoughts: true });
   let stream;
   try {
     stream = await ai.models.generateContentStream({ model, contents, config });
@@ -771,6 +774,7 @@ function createLLM(settings, fetchImpl = fetch) {
               temperature: args.temperature,
               thinkingLevel: settings.vertexThinkingLevel || (settings.smart ? 'HIGH' : 'LOW'),
               webSearch: !!settings.vertexWebSearch,
+              includeThoughts: true,
               signal: args.signal,
               onToken: args.onToken,
               onThought: args.onThought

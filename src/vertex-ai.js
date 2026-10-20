@@ -361,11 +361,9 @@ function buildVertexPayload(params = {}, modelId = '') {
 
   if (includeThinking) {
     generationConfig.thinkingConfig = {
-      thinkingLevel: lvl
+      thinkingLevel: lvl,
+      includeThoughts: true
     };
-    if (params.includeThoughts) {
-      generationConfig.thinkingConfig.includeThoughts = true;
-    }
   }
 
   const payload = {

@@ -82,6 +82,7 @@ const DEFAULTS = {
   // points", "casual tone". Applied to every LLM mode EXCEPT LeetCode (kept
   // strict for coding problems).
   aiRules: '',
+  sessionInstructions: '',
   // Overlay opacity (1 = fully opaque). Clamped so the window never vanishes.
   opacity: 1,
   // Slides: opt-in auto slide tracking (memory-only, forwarded, never written to disk).
