@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld('cue', {
   appLinkRevoke: (callerId) => ipcRenderer.invoke('applink:revoke', callerId),
   appLinkConsentRespond: (id, allowed) => ipcRenderer.send('applink:consent-response', { id, allowed }),
   pickProfileDocument: () => ipcRenderer.invoke('profile:pickDocument'),
+  testWhisperModel: (modelId) => ipcRenderer.invoke('whisper:test-model', modelId),
   quit: () => ipcRenderer.send('app:quit'),
   permissionsCheck: () => ipcRenderer.invoke('permissions:check'),
   permissionsRequest: () => ipcRenderer.invoke('permissions:request'),
@@ -56,13 +57,14 @@ contextBridge.exposeInMainWorld('cue', {
   log: (msg) => ipcRenderer.send('log', msg),
   on: (channel, cb) => {
     const allowed = [
-      'capture:state', 'llm:start', 'llm:token', 'llm:done', 'llm:error', 'status',
+      'capture:state', 'llm:start', 'llm:thought', 'llm:token', 'llm:done', 'llm:error', 'status',
       'transcript', 'transcript:restore', 'stt:interim', 'stt:final', 'stt:status',
       'vad:state', 'applink:consent-request', 'hide:toggle', 'whisper:download-progress',
       'whisper:models-changed', 'publik:state', 'slides:update',
       'stealth-key', 'toggle-ask-input', 'open-settings', 'settings-unlock',
       'reset-view', 'response:scroll', 'code:scroll', 'history:nav',
-      'transparency:toggle', 'interactive:state', 'attached-files', 'emergency:recover'
+      'transparency:toggle', 'interactive:state', 'attached-files', 'emergency:recover',
+      'open-meeting-companion'
     ];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, data) => cb(data));

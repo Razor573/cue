@@ -779,11 +779,22 @@ async function setCapturing(active) {
 }
 
 // -------- feature runner --------
+let activeFeatureAbort = null;
+
 async function runFeature(mode, userText) {
-  if (state.busy) return;
+  if (state.busy) {
+    if (activeFeatureAbort) {
+      activeFeatureAbort.abort();
+      activeFeatureAbort = null;
+    }
+    send('llm:done', { aborted: true });
+    state.busy = false;
+  }
   const def = MODES[mode];
   if (!def) return;
   state.busy = true;
+  activeFeatureAbort = new AbortController();
+  const currentAbort = activeFeatureAbort;
   let streamSettled = false; // drop stray tokens from a stream we've already abandoned
   try {
     const settings = store.getSettings();
@@ -874,7 +885,17 @@ async function runFeature(mode, userText) {
           system,
           turns: [{ role: 'user', text: built }],
           imageDataUrl,
-          onToken: (t) => { if (streamSettled) return; rearm(); send('llm:token', { text: t }); },
+          signal: currentAbort.signal,
+          onThought: (thoughtText) => {
+            if (streamSettled || currentAbort.signal.aborted) return;
+            rearm();
+            send('llm:thought', { text: thoughtText });
+          },
+          onToken: (t) => {
+            if (streamSettled || currentAbort.signal.aborted) return;
+            rearm();
+            send('llm:token', { text: t });
+          },
           onResponse: settings.provider === publik.PUBLIK_PROVIDER ? (res) => publikNoteHeaders(res && res.headers) : undefined
         }),
         stalled
@@ -883,18 +904,26 @@ async function runFeature(mode, userText) {
       streamSettled = true;
       clearTimeout(watchdog);
     }
-    send('llm:done', {});
+    if (!currentAbort.signal.aborted) {
+      send('llm:done', {});
+    }
     // Streams settle after their headers, so the charge is reconciled from
     // GET /wallet shortly after the answer — one request per answer, debounced.
     if (settings.provider === publik.PUBLIK_PROVIDER) publikScheduleWalletRefresh();
   } catch (e) {
+    if (currentAbort.signal.aborted || (e && /abort/i.test(e.message))) {
+      return;
+    }
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
     const action = e && e.action ? e.action : null;
     send('llm:error', { message: e && e.message ? e.message : String(e), action });
     if (action) publikHandleErrorAction(action);
   } finally {
     streamSettled = true;
-    state.busy = false;
+    if (activeFeatureAbort === currentAbort) {
+      activeFeatureAbort = null;
+      state.busy = false;
+    }
   }
 }
 
@@ -1094,6 +1123,7 @@ ipcMain.on('publik:open', (_e, url) => {
 function toggleCapture() {
   const targetState = !desiredCaptureState;
   desiredCaptureState = targetState;
+  send('status', { message: targetState ? 'Listening active (Mic + Meeting audio)' : 'Listening paused.' });
   if (!targetState && !state.capturing && localWhisperTranscriber) {
     localWhisperTranscriber.forceStop().catch(() => {});
   }
@@ -1105,6 +1135,21 @@ function toggleCapture() {
 ipcMain.handle('capture:toggle', () => toggleCapture());
 ipcMain.handle('capture:state', () => ({ active: state.capturing }));
 ipcMain.handle('whisper:models', () => getWhisperOverview());
+ipcMain.handle('whisper:test-model', async (_event, modelId) => {
+  if (!whisperModelManager) return { ok: false, error: 'The local Whisper model manager is not ready.' };
+  try {
+    const runtime = getWhisperRuntime();
+    if (!runtime.available) {
+      return { ok: false, error: runtime.message || 'Whisper runtime is unavailable.' };
+    }
+    const resolvedId = modelId || store.getSettings().localWhisper?.modelId || 'base.en';
+    const model = requireWhisperModel(resolvedId);
+    await whisperModelManager.verifyInstalledModel(model.id);
+    return { ok: true, modelId: model.id, message: 'Whisper engine and model verified and ready.' };
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || 'The selected local Whisper model is not downloaded or verified.' };
+  }
+});
 ipcMain.handle('whisper:model-download', async (_event, modelId) => {
   if (!whisperModelManager) throw new Error('The local Whisper model manager is not ready.');
   const result = await whisperModelManager.download(modelId, (progress) => send('whisper:download-progress', progress));
@@ -1370,6 +1415,11 @@ ipcMain.on('permissions:continue', async () => {
   }
 });
 
+function openMeetingWindow() {
+  send('open-meeting-companion', {});
+  send('status', { message: 'Meeting Companion view activated.' });
+}
+
 // -------- shortcuts --------
 function registerShortcuts() {
   // Primary Actions
@@ -1378,7 +1428,7 @@ function registerShortcuts() {
   shortcutState.assist = globalShortcut.register('CommandOrControl+Shift+Enter', () => runFeature('assist', ''));
   globalShortcut.register('CommandOrControl+Shift+Return', () => runFeature('assist', ''));
   globalShortcut.register('CommandOrControl+Shift+L', () => toggleCapture());
-  globalShortcut.register('CommandOrControl+Shift+M', () => send('history:nav', { direction: 'prev' }));
+  globalShortcut.register('CommandOrControl+Shift+M', () => openMeetingWindow());
   globalShortcut.register('CommandOrControl+Shift+K', () => {
     transcript.length = 0;
     buffers.you = [];

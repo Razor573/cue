@@ -540,9 +540,9 @@ button:focus { outline: none; }
 #settings-scrim {
   position: fixed; inset: 0; z-index: 20;
   display: grid; place-items: center;
-  background: rgba(5, 8, 15, 0.52);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 #settings-scrim.hidden { display: none; }
 #settings, .settings {
@@ -589,7 +589,9 @@ button:focus { outline: none; }
 /* Tab panes */
 .s-tab-pane {
   display: flex; flex-direction: column; gap: 8px;
-  overflow-y: auto; flex: 1; min-height: 0;
+  overflow-y: auto !important; flex: 1; min-height: 0;
+  max-height: calc(100vh - 160px);
+  pointer-events: auto;
   padding-right: 4px;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
@@ -1179,8 +1181,6 @@ button:focus { outline: none; }
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-height: 420px;
-  overflow-y: auto;
   padding-right: 4px;
 }
 .hotkey-group {
@@ -1215,4 +1215,65 @@ button:focus { outline: none; }
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+
+/* ==================== Thinking Indicator ==================== */
+.thinking-card {
+  margin: 6px 0 10px;
+  border-radius: var(--r-8);
+  background: rgba(91, 138, 245, 0.08);
+  border: 1px solid rgba(91, 138, 245, 0.22);
+  overflow: hidden;
+  transition: all 180ms var(--ease-fluid);
+}
+.thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: #c4d8ff;
+  user-select: none;
+  background: rgba(91, 138, 245, 0.05);
+}
+.thinking-header:hover {
+  background: rgba(91, 138, 245, 0.12);
+}
+.thinking-sparkle {
+  font-size: 12px;
+}
+.thinking-title {
+  flex: 1;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.thinking-chev {
+  font-size: 9px;
+  transition: transform 180ms ease;
+  color: var(--tx-mut);
+}
+.thinking-card.expanded .thinking-chev {
+  transform: rotate(0deg);
+}
+.thinking-card:not(.expanded) .thinking-chev {
+  transform: rotate(-90deg);
+}
+.thinking-card:not(.expanded) .thinking-body {
+  display: none;
+}
+.thinking-body {
+  padding: 8px 10px;
+  border-top: 1px solid rgba(91, 138, 245, 0.14);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.thinking-text {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--tx-2);
+  white-space: pre-wrap;
+  word-break: break-word;
 }

@@ -26,6 +26,44 @@ function applyRules(prompt, aiRules, mode) {
 const BASE_RULES =
   'Always respond in clear, natural English. Never switch to Hindi or any other language unless the user explicitly asks for it. ';
 
+const PHANTOM_LENS_DIRECTIVES = `
+---
+COMPREHENSIVE REASONING & RIGOROUS VERIFICATION DIRECTIVES:
+When formulating thoughts and reasoning through the problem, prioritize absolute mathematical, logical, and factual accuracy with focused, decisive progress:
+1. Complete Analytical & Mathematical Rigor:
+   - For math, science, and quantitative problems: write out explicit, full step-by-step derivations. Calculate every intermediate value cleanly. Verify all signs, arithmetic operations, algebraic transformations, formulas, units, and boundary conditions.
+   - For coding: thoroughly trace execution flow, state mutations, complexity, and critical edge cases (null/empty inputs, bounds, off-by-one errors).
+   - For multiple-choice & reading comprehension: scrutinize the exact wording, condition qualifiers (e.g. NOT, EXCEPT, LEAST, ALWAYS), and confirm why the chosen option is correct and why other options fail.
+2. Purposeful, Non-Redundant Verification:
+   - Verify calculations and logic decisively with a single, rigorous confirmation pass (e.g. sanity-checking against boundary conditions or plugging the result back into original constraints).
+   - Do not re-derive solved steps from scratch or generate repetitive parallel derivations. Once a step is validated, lock it in and advance forward.
+   - Calibrate depth to problem difficulty: straightforward questions need only a swift sanity check, while complex multi-step problems warrant a methodical derivation.
+3. Decisive Transition to Output:
+   - As soon as the solution is verified, immediately proceed to generating the final response.
+
+CORE DIRECTIVES & RESPONSE FLOW:
+Unless the user explicitly requests a different format, structure responses in this exact 3-part flow:
+1. **Question:** A single, concise 1-line restatement of the detected question or task so the user knows you read the right target.
+2. **Answer:** Immediately provide the direct final answer, verdict, or solution (e.g., the exact multiple-choice option, final math value, direct conclusion, or complete code block).
+3. **Explanation:** Provide a clear, structured breakdown explaining why the answer is correct, how the code/math works, or why other options are ruled out.
+
+STRICT READABILITY & FORMATTING RULES:
+1. Break the answer into short paragraphs separated by blank lines. Never write one long unbroken block of text.
+2. Use bullet or numbered lists for steps, options, or multiple points.
+3. Keep lines reasonably concise so text fits a narrow window without horizontal scrolling.
+4. Write ALL math as plain Unicode text (×, ÷, →, ⟹, ≤, ≥, ², ₂, ≠, ±, −) typed directly. NEVER use LaTeX backslash commands (\\times, \\frac, \\text, \\sqrt, \\%) outside of $...$ equations.
+5. Never wrap plain values in dollar signs. $18,000, 52ms, 3.0% must stay as plain text ($18,000, 52ms), NOT $$18,000$$ or $52\\text{ms}$.
+6. Only use $...$ or $$...$$ for genuinely complex multi-step equations, and keep those simple.
+7. Never use raw HTML tags (<p>, <br>, <b>) or wrap regular prose/LaTeX inside code blocks.
+8. Use topic-specific ## or ### headings ONLY when a complex answer genuinely needs sections. Never use generic labels like "# Analysis" or "# Summary".
+
+DOMAIN ADAPTATION:
+- Coding: Complete, verified code block under **Answer**, thorough breakdown and edge cases under **Explanation**.
+- Math/Logic: Final bolded result under **Answer**, complete step-by-step mathematical derivation showing all work under **Explanation**.
+- Law/Medicine/Sciences: Core conclusion/assessment under **Answer**, criteria, evidence, and differentials under **Explanation**.
+- Multiple Choice: Correct option letter/text in bold under **Answer**, complete justification of the winning choice and explicit elimination of distractors under **Explanation**.
+`.trim();
+
 const MODES = {
 
   // ── Assist: one-shot "do the smart thing" ─────────────────────────────────
@@ -123,7 +161,8 @@ const MODES = {
       return applyRules(buildSystem(
         'You are cue, a discreet real-time copilot looking at the user\'s screen. ' +
         BASE_RULES +
-        'Analyze what is on the screen and provide immediate, relevant answers, solutions, or explanations. Be concise and direct with no preamble.',
+        'Analyze what is on the screen and provide immediate, relevant answers, solutions, or explanations. Be concise and direct with no preamble.\n\n' +
+        PHANTOM_LENS_DIRECTIVES,
         contextBlock
       ), aiRules, 'look');
     },
@@ -145,7 +184,8 @@ const MODES = {
         BASE_RULES +
         'Answer the question directly and concisely. ' +
         'When the question is about the candidate\'s background, use their actual experience. ' +
-        'When the question is conceptual, explain clearly with examples. No preamble.',
+        'When the question is conceptual, explain clearly with examples. No preamble.\n\n' +
+        PHANTOM_LENS_DIRECTIVES,
         contextBlock
       ), aiRules, 'ask');
     },
@@ -200,4 +240,4 @@ const MODES = {
   }
 };
 
-module.exports = { MODES, formatTranscript };
+module.exports = { MODES, formatTranscript, PHANTOM_LENS_DIRECTIVES };

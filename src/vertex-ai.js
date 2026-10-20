@@ -363,6 +363,9 @@ function buildVertexPayload(params = {}, modelId = '') {
     generationConfig.thinkingConfig = {
       thinkingLevel: lvl
     };
+    if (params.includeThoughts) {
+      generationConfig.thinkingConfig.includeThoughts = true;
+    }
   }
 
   const payload = {
@@ -383,11 +386,12 @@ function buildVertexPayload(params = {}, modelId = '') {
   return payload;
 }
 
-async function consumeVertexSseStream(response, onToken) {
+async function consumeVertexSseStream(response, onToken, onThought, signal) {
   let fullText = '';
   let usage = null;
 
   const processLine = (line) => {
+    if (signal && signal.aborted) return;
     const trimmed = line.trim();
     if (!trimmed.startsWith('data:')) return;
     const jsonStr = trimmed.slice(5).trim();
@@ -405,7 +409,12 @@ async function consumeVertexSseStream(response, onToken) {
     for (const candidate of candidates) {
       const parts = (candidate.content && candidate.content.parts) || [];
       for (const part of parts) {
-        if (part && part.thought === true) continue;
+        if (part && part.thought === true) {
+          if (part.text && typeof onThought === 'function') {
+            onThought(part.text);
+          }
+          continue;
+        }
         if (part && typeof part.text === 'string' && part.text.length > 0) {
           fullText += part.text;
           if (typeof onToken === 'function') onToken(part.text);
@@ -418,6 +427,7 @@ async function consumeVertexSseStream(response, onToken) {
     const decoder = new TextDecoder();
     let buffer = '';
     for await (const chunk of response.body) {
+      if (signal && signal.aborted) break;
       buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || '';
@@ -429,6 +439,7 @@ async function consumeVertexSseStream(response, onToken) {
   } else if (typeof response.text === 'function') {
     const raw = await response.text();
     for (const line of raw.split(/\r?\n/)) {
+      if (signal && signal.aborted) break;
       processLine(line);
     }
   }
@@ -479,7 +490,8 @@ async function streamVertexGenerateContent(config = {}, params = {}, fetchImpl =
         'Content-Type': 'application/json',
         'x-goog-user-project': projectId
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: params.signal
     });
 
     if (response.status === 404 && i < candidateLocations.length - 1) {
@@ -500,7 +512,7 @@ async function streamVertexGenerateContent(config = {}, params = {}, fetchImpl =
       throw err;
     }
 
-    const { fullText, usage } = await consumeVertexSseStream(response, params.onToken);
+    const { fullText, usage } = await consumeVertexSseStream(response, params.onToken, params.onThought, params.signal);
     return {
       fullText,
       usage,

@@ -130,7 +130,6 @@
         <button class="s-tab" data-tab="profile">👤 Profile</button>
         <button class="s-tab" data-tab="transcription">🔉 Audio</button>
         <button class="s-tab" data-tab="style">✨ Style</button>
-        <button class="s-tab" data-tab="appearance">🌗 Appearance</button>
         <button class="s-tab" data-tab="hotkeys">⌨️ Hotkeys</button>
       </div>
 
@@ -139,11 +138,11 @@
         <label class="s-label">Provider</label>
         <div class="s-seg" id="provider-seg">
           <button data-provider="publik" id="provider-publik" class="hidden">publik API <span class="s-default-badge">default</span></button>
-          <button data-provider="vertex" data-val="vertex">Vertex AI</button>
-          <button data-provider="cerebras">Cerebras</button>
-          <button data-provider="openai">OpenAI</button>
-          <button data-provider="anthropic">Anthropic</button>
           <button data-provider="gemini">Gemini</button>
+          <button data-provider="vertex" data-val="vertex">Vertex AI</button>
+          <button data-provider="anthropic">Anthropic</button>
+          <button data-provider="openai">OpenAI</button>
+          <button data-provider="cerebras">Cerebras</button>
           <button data-provider="groq">Groq</button>
           <button data-provider="custom">Custom</button>
           <button data-provider="ollama">Ollama</button>
@@ -204,6 +203,28 @@
         <div id="azure-endpoint-settings" class="hidden">
           <label class="s-label" for="azure-endpoint">Azure endpoint <span class="s-hint">Azure OpenAI: https://&lt;resource&gt;.openai.azure.com/openai · AI Foundry: https://&lt;host&gt;.cognitiveservices.azure.com (cue adds /openai/v1)</span></label>
           <div class="s-field"><span>Endpoint</span><input id="azure-endpoint" type="text" placeholder="https://host.cognitiveservices.azure.com" autocomplete="off" /></div>
+        </div>
+
+        <div id="gemini-row" class="vertex-card hidden">
+          <div class="vertex-card-head">
+            <span class="vertex-card-title">Google Gemini Configuration</span>
+            <span class="vertex-badge ok">Active</span>
+          </div>
+          <div class="s-field">
+            <span>Thinking</span>
+            <div class="s-seg" id="gemini-thinking" style="flex:1;">
+              <button type="button" data-thinking="LOW" class="on">Low</button>
+              <button type="button" data-thinking="MEDIUM">Medium</button>
+              <button type="button" data-thinking="HIGH">High</button>
+            </div>
+          </div>
+          <div class="s-field">
+            <span>Search</span>
+            <label class="s-note" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input id="gemini-web-search" type="checkbox" style="width:auto;" />
+              Enable Google Search grounding
+            </label>
+          </div>
         </div>
 
         <div id="vertex-row" class="vertex-card hidden">
@@ -309,6 +330,7 @@
         <label class="s-label">Speech-to-text provider</label>
         <div class="s-seg s-seg-wrap" id="stt-provider-seg">
           <button data-stt-provider="auto">Auto</button>
+          <button data-stt-provider="gemini">Gemini</button>
           <button data-stt-provider="local">Local</button>
           <button data-stt-provider="openai">OpenAI</button>
           <button data-stt-provider="custom">Custom</button>
@@ -341,8 +363,10 @@
             <button id="whisper-download" class="s-action">Download</button>
             <button id="whisper-cancel" class="s-action hidden">Cancel</button>
             <button id="whisper-import" class="s-action">Import…</button>
+            <button id="whisper-test-btn" type="button" class="s-action">Test Whisper</button>
             <button id="whisper-delete" class="s-action danger" disabled>Delete</button>
           </div>
+          <div id="whisper-test-status" class="s-note"></div>
 
           <div class="s-field">
             <span>Language</span>
@@ -369,25 +393,16 @@
       <!-- Tab: Style -->
       <div class="s-body s-tab-pane hidden" data-pane="style">
         <label class="s-label">AI rules <span class="s-hint">how the AI should write its responses</span></label>
-        <textarea id="ai-rules" rows="10" spellcheck="false" maxlength="2000" placeholder="e.g.
+        <textarea id="ai-rules" rows="10" spellcheck="false" placeholder="e.g.
 - Never use em-dashes.
 - Reply in 2-3 short bullet points.
 - Use a casual, first-person tone.
 - Avoid jargon; explain technical terms.
 - Don&#39;t start with &quot;I&quot;.
 "></textarea>
-        <div class="s-counter"><span id="ai-rules-count">0</span> / 2000</div>
+        <div class="s-counter"><span id="ai-rules-count">0</span> characters</div>
         <div class="s-hint-block">
           These rules tell cue <strong>how</strong> to write, not <strong>what</strong> to say. Use one imperative sentence per line (e.g. <em>Never use em-dashes.</em>). They apply to every mode except coding-problem solves (LeetCode), which stays strict. Stored locally; never sent anywhere except the AI provider when cue answers a question.
-        </div>
-      </div>
-
-      <!-- Tab: Appearance -->
-      <div class="s-body s-tab-pane hidden" data-pane="appearance">
-        <label class="s-label" for="s-opacity-slider">Opacity <span class="s-hint">how see-through the overlay is</span></label>
-        <div class="s-opacity-row">
-          <input type="range" id="s-opacity-slider" min="20" max="100" step="1" value="100" />
-          <span id="s-opacity-value">100%</span>
         </div>
       </div>
 

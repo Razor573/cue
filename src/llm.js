@@ -522,16 +522,25 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
 // (thinkingBudget: 0 is rejected by pro models and "minimal" by flash, so
 // "low" is the one setting that works across the family.)
 const GEMINI_THINKING_HEADROOM = { fast: 1024, smart: 4096 };
-function geminiGenerationConfig({ system, maxTokens, thinking }) {
+function geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch = false, includeThoughts = false }) {
   const config = {
     systemInstruction: system,
     maxOutputTokens: maxTokens + (thinking ? GEMINI_THINKING_HEADROOM.smart : GEMINI_THINKING_HEADROOM.fast)
   };
-  if (!thinking) config.thinkingConfig = { thinkingLevel: 'low' };
+  if (thinkingLevel) {
+    config.thinkingConfig = { thinkingLevel: String(thinkingLevel).toLowerCase() };
+    if (includeThoughts) config.thinkingConfig.includeThoughts = true;
+  } else if (!thinking) {
+    config.thinkingConfig = { thinkingLevel: 'low' };
+    if (includeThoughts) config.thinkingConfig.includeThoughts = true;
+  }
+  if (webSearch) {
+    config.tools = [{ googleSearch: {} }];
+  }
   return config;
 }
 
-async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, thinking, onToken }) {
+async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, thinking, thinkingLevel, webSearch, signal, onToken, onThought }) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
   const contents = turns.map((t, i) => {
@@ -543,7 +552,7 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
     }
     return { role: t.role === 'assistant' ? 'model' : 'user', parts };
   });
-  const config = geminiGenerationConfig({ system, maxTokens, thinking });
+  const config = geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch });
   let stream;
   try {
     stream = await ai.models.generateContentStream({ model, contents, config });
@@ -556,8 +565,27 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
   }
   let full = '';
   for await (const chunk of stream) {
-    const t = chunk && chunk.text;
-    if (t) { full += t; onToken(t); }
+    if (signal && signal.aborted) {
+      throw new Error('Aborted');
+    }
+    const parts = chunk.candidates?.[0]?.content?.parts;
+    if (parts && Array.isArray(parts)) {
+      for (const part of parts) {
+        if (!part || typeof part.text !== 'string') continue;
+        if (part.thought === true) {
+          if (typeof onThought === 'function') onThought(part.text);
+        } else {
+          full += part.text;
+          if (typeof onToken === 'function') onToken(part.text);
+        }
+      }
+    } else {
+      const t = chunk && chunk.text;
+      if (t) {
+        full += t;
+        if (typeof onToken === 'function') onToken(t);
+      }
+    }
   }
   return full;
 }
@@ -743,7 +771,9 @@ function createLLM(settings, fetchImpl = fetch) {
               temperature: args.temperature,
               thinkingLevel: settings.vertexThinkingLevel || (settings.smart ? 'HIGH' : 'LOW'),
               webSearch: !!settings.vertexWebSearch,
-              onToken: args.onToken
+              signal: args.signal,
+              onToken: args.onToken,
+              onThought: args.onThought
             },
             fetchImpl
           );
@@ -758,7 +788,12 @@ function createLLM(settings, fetchImpl = fetch) {
         if (provider === 'minimax') return await streamOpenAI({ ...args, baseURL: MINIMAX_BASE_URLS[minimaxRegion] || MINIMAX_BASE_URLS.global_en });
         if (provider === 'deepseek') return await streamOpenAI({ ...args, baseURL: DEEPSEEK_BASE_URL });
         if (provider === 'anthropic') return await streamAnthropic(args);
-        if (provider === 'gemini') return await streamGemini(args);
+        if (provider === 'gemini') return await streamGemini({
+          ...args,
+          thinkingLevel: settings.geminiThinkingLevel || 'LOW',
+          webSearch: !!settings.geminiWebSearch,
+          onThought: args.onThought
+        });
         if (provider === 'azure') return await streamAzure(args);
         throw new Error('unknown provider: ' + provider);
       } catch (error) {

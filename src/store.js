@@ -17,7 +17,7 @@ const fileStore = createFileStore(() => (app ? app.getPath('userData') : require
 
 // Cap on the user's custom response rules. Generous but bounded: anything longer
 // should live in a real prompt file, not in a settings field.
-const MAX_AI_RULES_CHARS = 2000;
+const MAX_AI_RULES_CHARS = 1000000;
 
 const DEFAULTS = {
   provider: 'openai',
@@ -39,6 +39,8 @@ const DEFAULTS = {
   minimaxRegion: 'global_en',
   apiKeys: { cerebras: '', openai: '', anthropic: '', gemini: '', vertex: '', deepgram: '', custom: '', ollama: '', groq: '', minimax: '', deepseek: '', azure: '', publik: '' },
   azureEndpoint: '',
+  geminiThinkingLevel: 'LOW',
+  geminiWebSearch: false,
   vertexProject: '',
   vertexLocation: 'global',
   vertexThinkingLevel: 'LOW',

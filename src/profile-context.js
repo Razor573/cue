@@ -5,7 +5,7 @@ const MAX_RESUME_CONTEXT_CHARS = 12000;
 // Generous but bounded cap on the user-written response rules. Same idea as
 // the résumé cap: anything longer should live in a real prompt file, not in
 // a settings field.
-const MAX_AI_RULES_CHARS = 2000;
+const MAX_AI_RULES_CHARS = 1000000;
 
 /**
  * Adds a résumé as data-only context without changing prompts for users who have not supplied one.

@@ -90,7 +90,31 @@
     messages.appendChild(b);
   }
 
+  let thinkingEl = null;
+  let accumulatedThinking = '';
+  let thinkingStart = 0;
+  let thinkingTimer = null;
+
+  function finalizeCurrentResponse(interrupted = false) {
+    if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
+    if (thinkingEl) {
+      thinkingEl.classList.remove('expanded');
+      thinkingEl = null;
+    }
+    if (aiEl) {
+      if (interrupted && caretEl) {
+        const notice = document.createElement('span');
+        notice.style.opacity = '0.5';
+        notice.style.fontSize = '11px';
+        notice.textContent = ' [superseded]';
+        aiEl.insertBefore(notice, caretEl);
+      }
+      finalizeAi();
+    }
+  }
+
   function startAi(small) {
+    finalizeCurrentResponse(false);
     aiEl = document.createElement('div');
     aiEl.className = 'ai-text' + (small ? ' small' : '');
     aiEl.dataset.raw = '';
@@ -101,6 +125,14 @@
   }
 
   function appendToken(t) {
+    if (thinkingEl) {
+      if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
+      thinkingEl.classList.remove('expanded');
+      const elapsed = Math.max(1, Math.floor((Date.now() - thinkingStart) / 1000));
+      const titleEl = thinkingEl.querySelector('.thinking-title');
+      if (titleEl) titleEl.textContent = `Thought for ${elapsed}s`;
+      thinkingEl = null;
+    }
     if (!aiEl) startAi(false);
     aiEl.dataset.raw += t;
     const span = document.createElement('span');
@@ -170,7 +202,11 @@
 
   // ---- actions -----------------------------------------------------------
   function runMode(mode, text) {
-    if (busy) return;
+    const scrimEl = $('#settings-scrim');
+    if (scrimEl && !scrimEl.classList.contains('hidden')) void closeSettings();
+    if (busy) {
+      finalizeCurrentResponse(true);
+    }
     setBusy(true);
     cue.ask({ mode, text: text || '' });
   }
@@ -1045,6 +1081,7 @@
     // Here we only start the mic (no gesture required) and stop everything on deactivate.
     if (active) {
       startMic();
+      startSystemAudio().catch(() => {});
       // Don't auto-open sidebar — user can toggle it manually
     } else {
       stopMic();
@@ -1195,15 +1232,67 @@
     });
     setBusy(true);
   });
+  cue.on('llm:thought', ({ text }) => {
+    if (!thinkingEl) {
+      accumulatedThinking = '';
+      thinkingStart = Date.now();
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'thinking-card expanded';
+      thinkingEl.innerHTML = `
+        <div class="thinking-header">
+          <span class="thinking-sparkle">✨</span>
+          <span class="thinking-title">Thinking… (0s)</span>
+          <span class="thinking-chev">▼</span>
+        </div>
+        <div class="thinking-body">
+          <pre class="thinking-text"></pre>
+        </div>
+      `;
+      const headerEl = thinkingEl.querySelector('.thinking-header');
+      if (headerEl) {
+        headerEl.addEventListener('click', () => {
+          thinkingEl.classList.toggle('expanded');
+        });
+      }
+      if (aiEl && aiEl.parentNode) {
+        aiEl.parentNode.insertBefore(thinkingEl, aiEl);
+      } else {
+        messages.appendChild(thinkingEl);
+      }
+      if (thinkingTimer) clearInterval(thinkingTimer);
+      thinkingTimer = setInterval(() => {
+        if (!thinkingEl) {
+          clearInterval(thinkingTimer);
+          thinkingTimer = null;
+          return;
+        }
+        const elapsed = Math.max(0, Math.floor((Date.now() - thinkingStart) / 1000));
+        const title = thinkingEl.querySelector('.thinking-title');
+        if (title && thinkingEl.classList.contains('expanded')) {
+          title.textContent = `Thinking… (${elapsed}s)`;
+        }
+      }, 1000);
+    }
+    accumulatedThinking += text;
+    const txtEl = thinkingEl.querySelector('.thinking-text');
+    if (txtEl) {
+      txtEl.textContent = accumulatedThinking;
+    }
+    messages.scrollTop = messages.scrollHeight;
+  });
   cue.on('llm:token', ({ text }) => appendToken(text));
-  cue.on('llm:done', () => { finalizeAi(); setBusy(false); });
+  cue.on('llm:done', () => { finalizeCurrentResponse(false); setBusy(false); });
   cue.on('llm:error', ({ message, action }) => {
+    finalizeCurrentResponse(false);
     if (!aiEl) startAi(true);
     aiEl.dataset.raw = message; finalizeAi(); setBusy(false);
     // publik errors carry one action: the renderer's markdown emits no anchors,
     // so a link needs a real button (same pattern as the mic banner).
     if (action && action.kind === 'card') { showPublikCard(); return; }
     if (action && action.kind) showStatus(message, publikActionButton(action));
+  });
+  cue.on('open-meeting-companion', () => {
+    toggleSidebar();
   });
   cue.on('transcript', ({ channel, text }) => {
     if (!text || text.trim().length < 2 || /^[?!.,;:\-…]+$/.test(text.trim())) return;
@@ -1260,16 +1349,12 @@
   // ---- prep status & smart tooltip helpers -------------------------------
 
 
-  // ---- AI rules: live char counter + soft cap ---------------------------
+  // ---- AI rules: live char counter ---------------------------------------
   function updateAiRulesCounter() {
     const el = document.getElementById('ai-rules');
     const counter = document.getElementById('ai-rules-count');
     if (!el || !counter) return;
-    const n = el.value.length;
-    const cap = 2000;
-    counter.textContent = String(n);
-    counter.classList.toggle('over', n >= cap);
-    counter.parentElement.classList.toggle('s-counter-warn', n >= cap - 100);
+    counter.textContent = String(el.value.length);
   }
   const aiRulesEl = document.getElementById('ai-rules');
   if (aiRulesEl) aiRulesEl.addEventListener('input', updateAiRulesCounter);
@@ -1369,6 +1454,8 @@
     if (azureEndpointSettings) azureEndpointSettings.classList.toggle('hidden', provider !== 'azure');
     const vertexRow = $('#vertex-row');
     if (vertexRow) vertexRow.classList.toggle('hidden', provider !== 'vertex');
+    const geminiRow = $('#gemini-row');
+    if (geminiRow) geminiRow.classList.toggle('hidden', provider !== 'gemini');
     renderPublikBlock();
   }
 
@@ -1447,6 +1534,14 @@
       if (!settings) return;
       settings.vertexThinkingLevel = btn.dataset.thinking || 'LOW';
       document.querySelectorAll('#vertex-thinking button').forEach((b) => b.classList.toggle('on', b === btn));
+    });
+  });
+
+  document.querySelectorAll('#gemini-thinking button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!settings) return;
+      settings.geminiThinkingLevel = btn.dataset.thinking || 'LOW';
+      document.querySelectorAll('#gemini-thinking button').forEach((b) => b.classList.toggle('on', b === btn));
     });
   });
 
@@ -1607,6 +1702,8 @@
         vertexLocation: ($('#vertex-location') && $('#vertex-location').value) || 'global',
         vertexThinkingLevel: settings.vertexThinkingLevel || 'LOW',
         vertexWebSearch: !!($('#vertex-web-search') && $('#vertex-web-search').checked),
+        geminiThinkingLevel: settings.geminiThinkingLevel || 'LOW',
+        geminiWebSearch: !!($('#gemini-web-search') && $('#gemini-web-search').checked),
         fastModel: ($('#model-fast') && $('#model-fast').value.trim()) || '',
         smartModel: ($('#model-smart') && $('#model-smart').value.trim()) || ''
       });
@@ -1771,6 +1868,10 @@
     if ($('#vertex-web-search')) $('#vertex-web-search').checked = !!settings.vertexWebSearch;
     document.querySelectorAll('#vertex-thinking button').forEach((b) => {
       b.classList.toggle('on', b.dataset.thinking === (settings.vertexThinkingLevel || 'LOW'));
+    });
+    if ($('#gemini-web-search')) $('#gemini-web-search').checked = !!settings.geminiWebSearch;
+    document.querySelectorAll('#gemini-thinking button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.thinking === (settings.geminiThinkingLevel || 'LOW'));
     });
     updateVertexStatusBadge();
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
@@ -2016,6 +2117,42 @@
     }
   });
 
+  const whisperTestBtn = $('#whisper-test-btn');
+  if (whisperTestBtn) {
+    whisperTestBtn.addEventListener('click', async () => {
+      const statusEl = $('#whisper-test-status');
+      const model = getSelectedWhisperModel();
+      const modelId = model ? model.id : ($('#whisper-model') ? $('#whisper-model').value : 'base.en');
+      whisperTestBtn.disabled = true;
+      if (statusEl) {
+        statusEl.textContent = `Testing Whisper model (${modelId})…`;
+        statusEl.style.color = 'var(--tx-dim)';
+      }
+      try {
+        if (!cue.testWhisperModel) throw new Error('Whisper test interface not available.');
+        const res = await cue.testWhisperModel(modelId);
+        if (res && res.ok) {
+          if (statusEl) {
+            statusEl.textContent = `✓ ${res.message || 'Whisper is ready.'}`;
+            statusEl.style.color = '#10B981';
+          }
+        } else {
+          if (statusEl) {
+            statusEl.textContent = `✗ ${(res && res.error) || 'Whisper check failed.'}`;
+            statusEl.style.color = '#EF4444';
+          }
+        }
+      } catch (err) {
+        if (statusEl) {
+          statusEl.textContent = `✗ ${err.message || String(err)}`;
+          statusEl.style.color = '#EF4444';
+        }
+      } finally {
+        whisperTestBtn.disabled = false;
+      }
+    });
+  }
+
   cue.on('whisper:download-progress', (progress) => {
     if (!whisperOverview) return;
     const model = whisperOverview.models.find((candidate) => candidate.id === progress.modelId);
@@ -2049,6 +2186,7 @@
     if ($('#vertex-project')) settings.vertexProject = $('#vertex-project').value.trim();
     if ($('#vertex-location')) settings.vertexLocation = $('#vertex-location').value || 'global';
     if ($('#vertex-web-search')) settings.vertexWebSearch = !!$('#vertex-web-search').checked;
+    if ($('#gemini-web-search')) settings.geminiWebSearch = !!$('#gemini-web-search').checked;
     const typedVertexSa = ($('#vertex-sa-json') && $('#vertex-sa-json').value.trim()) || '';
     if (typedVertexSa) {
       settings.apiKeys.vertex = typedVertexSa;
@@ -2119,7 +2257,14 @@
   // ---- global keys -------------------------------------------------------
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !scrim.classList.contains('hidden')) void closeSettings();
-    if ((e.metaKey || e.ctrlKey) && e.key === ',') { e.preventDefault(); openSettings(); }
+    if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+      e.preventDefault();
+      if (!scrim.classList.contains('hidden')) {
+        void closeSettings();
+      } else {
+        openSettings();
+      }
+    }
   });
 
   // Safety net for the same class of bug: html/body are overflow:hidden, so any
@@ -2448,7 +2593,12 @@
   });
 
   cue.on('open-settings', () => {
-    openSettings();
+    const scrimEl = $('#settings-scrim');
+    if (scrimEl && !scrimEl.classList.contains('hidden')) {
+      void closeSettings();
+    } else {
+      openSettings();
+    }
   });
 
   cue.on('settings-unlock', ({ interactive }) => {
@@ -2470,6 +2620,14 @@
   });
 
   cue.on('response:scroll', ({ delta }) => {
+    const scrimEl = $('#settings-scrim');
+    if (scrimEl && !scrimEl.classList.contains('hidden')) {
+      const activePane = scrimEl.querySelector('.s-tab-pane:not(.hidden)');
+      if (activePane) {
+        activePane.scrollBy({ top: delta || 0, behavior: 'smooth' });
+        return;
+      }
+    }
     const m = $('#messages');
     if (m) m.scrollBy({ top: delta || 0, behavior: 'smooth' });
   });
