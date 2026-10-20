@@ -62,15 +62,19 @@ const stealthKeyboard = new StealthKeyboardManager(() => win);
 
 function applyInteractivityState() {
   if (!win || win.isDestroyed()) return;
-  ensureContentProtection(win);
-  if (interactiveOverride) {
-    win.setIgnoreMouseEvents(false);
-    try { win.setFocusable(true); } catch (_) {}
-    send('interactive:state', { interactive: true });
-  } else {
-    win.setIgnoreMouseEvents(true, { forward: true });
-    try { win.setFocusable(false); } catch (_) {}
-    send('interactive:state', { interactive: false });
+  try {
+    ensureContentProtection(win);
+    if (interactiveOverride) {
+      try { win.setIgnoreMouseEvents(false); } catch (_) {}
+      try { win.setFocusable(true); } catch (_) {}
+      send('interactive:state', { interactive: true });
+    } else {
+      try { win.setIgnoreMouseEvents(true, { forward: true }); } catch (_) {}
+      try { win.setFocusable(false); } catch (_) {}
+      send('interactive:state', { interactive: false });
+    }
+  } catch (err) {
+    console.warn('[cue] applyInteractivityState error:', err);
   }
 }
 
@@ -170,7 +174,14 @@ function pushTranscript(turn) {
   if (meetingMemory) meetingMemory.onTurn(turn);
 }
 
-function send(channel, data) { if (win && !win.isDestroyed()) win.webContents.send(channel, data); }
+function send(channel, data) {
+  if (!win || win.isDestroyed() || !win.webContents) return;
+  try {
+    win.webContents.send(channel, data);
+  } catch (err) {
+    console.warn(`[cue] Failed to send IPC "${channel}":`, err.message);
+  }
+}
 
 function getWhisperRuntime() {
   return locateWhisperRuntime({
@@ -361,16 +372,24 @@ function createWindow() {
   });
 
   win.on('show', () => {
-    ensureContentProtection(win);
-    applyInteractivityState();
-    registerAppShortcuts();
+    try {
+      ensureContentProtection(win);
+      applyInteractivityState();
+      registerAppShortcuts();
+    } catch (err) {
+      console.warn('[cue] Error in win.on show:', err);
+    }
   });
 
   win.on('hide', () => {
-    if (stealthKeyboard && stealthKeyboard.isActive()) {
-      stealthKeyboard.stop();
+    try {
+      if (stealthKeyboard && stealthKeyboard.isActive()) {
+        stealthKeyboard.stop();
+      }
+      unregisterAppShortcuts();
+    } catch (err) {
+      console.warn('[cue] Error in win.on hide:', err);
     }
-    unregisterAppShortcuts();
   });
 
   win.on('focus', () => {
@@ -1361,16 +1380,20 @@ function removeLastAttachedFile() {
 
 function toggleOverlayVisibility() {
   if (!win || win.isDestroyed()) return;
-  if (win.isVisible()) {
-    if (stealthKeyboard && stealthKeyboard.isActive()) {
-      stealthKeyboard.stop();
+  try {
+    if (win.isVisible()) {
+      if (stealthKeyboard && stealthKeyboard.isActive()) {
+        stealthKeyboard.stop();
+      }
+      win.hide();
+      unregisterAppShortcuts();
+    } else {
+      win.showInactive();
+      ensureContentProtection(win);
+      registerAppShortcuts();
     }
-    win.hide();
-    unregisterAppShortcuts();
-  } else {
-    win.showInactive();
-    ensureContentProtection(win);
-    registerAppShortcuts();
+  } catch (err) {
+    console.warn('[cue] Error in toggleOverlayVisibility:', err);
   }
 }
 // Window dragging is done here rather than with CSS drag regions, which misbehave while the
@@ -1486,7 +1509,6 @@ const APP_SHORTCUT_KEYS = [
   'CommandOrControl+Shift+Plus',
   'CommandOrControl+Shift+[',
   'CommandOrControl+Shift+-',
-  'CommandOrControl+Shift+Minus',
   'CommandOrControl+Shift+V',
   'CommandOrControl+O',
   'CommandOrControl+Shift+O',
@@ -1496,23 +1518,28 @@ const APP_SHORTCUT_KEYS = [
 ];
 
 function registerVisibilityShortcuts() {
-  globalShortcut.register('CommandOrControl+\\', () => toggleOverlayVisibility());
-  globalShortcut.register('CommandOrControl+Shift+H', () => toggleOverlayVisibility());
-  globalShortcut.register('CommandOrControl+Shift+R', () => emergencyRecover());
+  try {
+    globalShortcut.register('CommandOrControl+\\', () => toggleOverlayVisibility());
+    globalShortcut.register('CommandOrControl+Shift+H', () => toggleOverlayVisibility());
+    globalShortcut.register('CommandOrControl+Shift+R', () => emergencyRecover());
+  } catch (err) {
+    console.warn('[cue] Failed to register visibility shortcut:', err);
+  }
 }
 
 function registerAppShortcuts() {
   if (appShortcutsRegistered) return;
 
-  // Primary Actions
-  shortcutState.say = globalShortcut.register('CommandOrControl+Return', () => {
-    if (!isOverlayVisible()) return;
-    runFeature('say', '');
-  });
-  globalShortcut.register('CommandOrControl+Enter', () => {
-    if (!isOverlayVisible()) return;
-    runFeature('look', '');
-  });
+  try {
+    // Primary Actions
+    shortcutState.say = globalShortcut.register('CommandOrControl+Return', () => {
+      if (!isOverlayVisible()) return;
+      runFeature('say', '');
+    });
+    globalShortcut.register('CommandOrControl+Enter', () => {
+      if (!isOverlayVisible()) return;
+      runFeature('look', '');
+    });
   shortcutState.assist = globalShortcut.register('CommandOrControl+Shift+Enter', () => {
     if (!isOverlayVisible()) return;
     runFeature('assist', '');
@@ -1637,10 +1664,6 @@ function registerAppShortcuts() {
     if (!isOverlayVisible()) return;
     adjustOpacity(-0.1);
   });
-  globalShortcut.register('CommandOrControl+Shift+Minus', () => {
-    if (!isOverlayVisible()) return;
-    adjustOpacity(-0.1);
-  });
 
   // Transparency mode
   globalShortcut.register('CommandOrControl+Shift+V', () => {
@@ -1674,13 +1697,16 @@ function registerAppShortcuts() {
     send('hide:toggle', {});
   });
 
-  for (const [name, wasRegistered] of Object.entries(shortcutState)) {
-    if (!wasRegistered) {
-      recordEvent({ level: 'warn', event: 'shortcut_unavailable', msg: 'another application holds the ' + name + ' shortcut', frame: 'registerShortcuts', context: { shortcut: name } });
+    for (const [name, wasRegistered] of Object.entries(shortcutState)) {
+      if (!wasRegistered) {
+        recordEvent({ level: 'warn', event: 'shortcut_unavailable', msg: 'another application holds the ' + name + ' shortcut', frame: 'registerShortcuts', context: { shortcut: name } });
+      }
     }
+  } catch (err) {
+    console.warn('[cue] Failed to register app shortcuts:', err);
+  } finally {
+    appShortcutsRegistered = true;
   }
-
-  appShortcutsRegistered = true;
 }
 
 function unregisterAppShortcuts() {
