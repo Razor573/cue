@@ -168,10 +168,47 @@ const ringBuffers = {
   them: new AudioRingBuffer(300, 16000)
 };
 
+const crossTalkState = {
+  themLastActiveTs: 0,
+  themRecentRms: 0,
+  recentThemTurns: [] // { text, ts }
+};
+
+function isTextualEcho(youText, recentThemTurns) {
+  const cleanYou = String(youText || '').toLowerCase().replace(/[^\w\s]/g, '').trim();
+  if (!cleanYou || cleanYou.length < 3) return false;
+  const youWords = cleanYou.split(/\s+/).filter(Boolean);
+  if (!youWords.length) return false;
+  for (const { text: themText } of recentThemTurns) {
+    const cleanThem = String(themText || '').toLowerCase().replace(/[^\w\s]/g, '').trim();
+    if (cleanThem.includes(cleanYou)) return true;
+    const themWords = new Set(cleanThem.split(/\s+/).filter(Boolean));
+    const matchCount = youWords.filter(w => themWords.has(w)).length;
+    if (youWords.length <= 3 && matchCount === youWords.length) return true;
+    if (youWords.length > 3 && (matchCount / youWords.length) >= 0.7) return true;
+  }
+  return false;
+}
+
 function pushTranscript(turn) {
+  if (!turn || !turn.text) return false;
+  const now = Date.now();
+
+  if (turn.channel === 'them') {
+    crossTalkState.recentThemTurns.push({ text: turn.text.toLowerCase().trim(), ts: now });
+    if (crossTalkState.recentThemTurns.length > 8) crossTalkState.recentThemTurns.shift();
+  } else if (turn.channel === 'you') {
+    crossTalkState.recentThemTurns = crossTalkState.recentThemTurns.filter(t => (now - t.ts) < 3500);
+    if (isTextualEcho(turn.text, crossTalkState.recentThemTurns)) {
+      console.log(`[audio] suppressed acoustic echo on you channel: "${turn.text}"`);
+      return false;
+    }
+  }
+
   transcript.push(turn);
   if (transcript.length > MAX_TRANSCRIPT_TURNS) transcript.splice(0, transcript.length - MAX_TRANSCRIPT_TURNS);
   if (meetingMemory) meetingMemory.onTurn(turn);
+  return true;
 }
 
 function send(channel, data) {
@@ -197,7 +234,7 @@ function getWhisperRuntime() {
 function publishTranscript(channel, text) {
   if (!text || !text.trim()) return;
   const turn = { channel, text: text.trim(), ts: Date.now() };
-  pushTranscript(turn);
+  if (!pushTranscript(turn)) return;
   send('transcript', turn);
   send('stt:final', { channel, text: turn.text });
 }
@@ -426,8 +463,9 @@ async function flushChannel(channel) {
     }
     if (res.text && res.text.trim() && res.text.trim().length > 1 && !/^[?!.,;:\-…]+$/.test(res.text.trim())) {
       const turn = { channel, text: res.text.trim(), ts: Date.now() };
-      pushTranscript(turn);
-      send('transcript', turn);
+      if (pushTranscript(turn)) {
+        send('transcript', turn);
+      }
     }
   } catch (e) {
     console.log('[stt] error', e && e.message);
@@ -478,9 +516,10 @@ function initStreamingSTT() {
         if (instance && streamingSTT[ch] !== instance) return; // stale instance after a stop/start
 
         const turn = { channel: ch, text, ts: Date.now() };
-        pushTranscript(turn);
-        send('transcript', turn);
-        send('stt:final', { channel: ch, text });
+        if (pushTranscript(turn)) {
+          send('transcript', turn);
+          send('stt:final', { channel: ch, text });
+        }
       },
       onInterim: (ch, text) => {
         if (instance && streamingSTT[ch] !== instance) return;
@@ -674,6 +713,27 @@ function noteAudioLevel(channel, buf) {
 function routeAudio(channel, pcmBuffer) {
   const buf = Buffer.from(pcmBuffer);
   noteAudioLevel(channel, buf);
+
+  if (channel === 'them') {
+    const themRms = rms16(buf);
+    if (themRms > 140) {
+      crossTalkState.themLastActiveTs = Date.now();
+      crossTalkState.themRecentRms = Math.max(crossTalkState.themRecentRms * 0.7, themRms);
+    }
+  } else if (channel === 'you') {
+    const now = Date.now();
+    const youRms = rms16(buf);
+    const themActive = (now - crossTalkState.themLastActiveTs < 450);
+    if (themActive) {
+      // Speaker bleed detection: if 'you' audio energy is less than speaker loopback or below the elevated gate,
+      // it is acoustic leakage from laptop speakers into the microphone. Drop it.
+      const isBleed = (youRms < crossTalkState.themRecentRms * 0.85) || (youRms < RMS_GATE * 2.0);
+      if (isBleed) {
+        // Acoustic echo suppressed - do not push to buffers or send to streaming STT
+        return;
+      }
+    }
+  }
 
   if (localWhisperTranscriber) {
     localWhisperTranscriber.push(channel, buf);

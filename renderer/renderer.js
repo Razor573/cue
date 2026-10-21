@@ -2127,20 +2127,26 @@
   cue.on('publik:state', (state) => { publikState = state; renderPublikBlock(); maybeShowLowStarter(state); });
 
   const GEMINI_STT_FALLBACK_MODELS = [
-    { id: 'gemini-3.5-transcribe', label: 'Gemini 3.5 Transcribe (Default transcription engine)' },
-    { id: 'gemini-3.5-transcribe-live', label: 'Gemini 3.5 Transcribe Live (Streaming low-latency)' },
-    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Multimodal audio transcription)' },
-    { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash (Multimodal audio transcription)' },
-    { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Fast audio transcription)' },
-    { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite (Ultralight transcription)' },
-    { id: 'gemini-4-argon', label: 'Gemini 4 Argon (High-precision transcription)' }
+    { id: 'gemini-3.5-transcribe', label: 'Gemini 3.5 Transcribe · Fast (~400ms) · Dedicated ASR word-level accuracy · $0.31/hr (10 RPM)' },
+    { id: 'gemini-3.5-transcribe-live', label: 'Gemini 3.5 Transcribe Live · Sub-second streaming · Real-time live accuracy · $0.54/hr' },
+    { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live · Instant (~200ms) · Conversational voice audio · $1.35/hr' },
+    { id: 'gemini-3.8-live-extended-thinking', label: 'Gemini 3.8 Live Extended Thinking · Instant (~200ms) + reasoning · Deep voice comprehension · $2.10/hr' },
+    { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · Ultra-fast (~300ms) · Good accuracy · $0.05/hr (4,000 RPM, safest against 429s)' },
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash · Very fast (~500ms) · High accuracy & context understanding · $0.11/hr' },
+    { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · Fast (~450ms) · Balanced accuracy & speed · $0.08/hr' },
+    { id: 'gemini-3.5-live-translate-preview', label: 'Gemini 3.5 Live Translate · Low latency · Speech translation & multilingual voice · $0.54/hr' }
   ];
+
+  let cachedGeminiSttModels = null;
 
   function updateGeminiSttRowVisibility() {
     const row = $('#gemini-stt-row');
+    const fallbackRow = $('#gemini-stt-fallback-row');
     if (!row) return;
     const provider = settings.sttProvider || 'auto';
-    row.classList.toggle('hidden', provider !== 'gemini' && provider !== 'auto');
+    const show = provider === 'gemini' || provider === 'auto';
+    row.classList.toggle('hidden', !show);
+    if (fallbackRow) fallbackRow.classList.toggle('hidden', !show);
   }
 
   function populateGeminiSttModels(models, selectedVal) {
@@ -2148,6 +2154,7 @@
     if (!select) return;
     select.innerHTML = '';
     const list = Array.isArray(models) && models.length ? models : GEMINI_STT_FALLBACK_MODELS;
+    cachedGeminiSttModels = list;
     const current = selectedVal || settings.geminiSttModel || 'gemini-3.5-transcribe';
     for (const item of list) {
       const opt = document.createElement('option');
@@ -2158,6 +2165,45 @@
     }
     if (select.value) {
       settings.geminiSttModel = select.value;
+    }
+    populateGeminiSttFallbackModels(list, settings.geminiSttFallbackModel);
+  }
+
+  function populateGeminiSttFallbackModels(models, selectedVal) {
+    const select = $('#gemini-stt-fallback-select');
+    if (!select) return;
+    select.innerHTML = '';
+    const primarySelected = ($('#gemini-stt-model-select') && $('#gemini-stt-model-select').value) || settings.geminiSttModel || 'gemini-3.5-transcribe';
+    const list = (Array.isArray(models) && models.length ? models : GEMINI_STT_FALLBACK_MODELS)
+      .filter((m) => m.id !== primarySelected);
+    const preferredDefault = 'gemini-3.5-flash-lite';
+    let current = selectedVal || settings.geminiSttFallbackModel || preferredDefault;
+    if (current === primarySelected || !list.some((m) => m.id === current)) {
+      current = list.some((m) => m.id === preferredDefault) ? preferredDefault : (list[0] ? list[0].id : '');
+    }
+    for (const item of list) {
+      const opt = document.createElement('option');
+      opt.value = item.id;
+      opt.textContent = item.label || item.id;
+      if (item.id === current) opt.selected = true;
+      select.appendChild(opt);
+    }
+    if (select.value) {
+      settings.geminiSttFallbackModel = select.value;
+    }
+    updateFallbackDescription();
+  }
+
+  function updateFallbackDescription() {
+    const select = $('#gemini-stt-fallback-select');
+    const descEl = $('#gemini-stt-fallback-desc');
+    if (!select || !descEl) return;
+    const selectedId = select.value;
+    const model = (cachedGeminiSttModels || GEMINI_STT_FALLBACK_MODELS || []).find((m) => m.id === selectedId);
+    if (model && model.label) {
+      descEl.textContent = model.label;
+    } else {
+      descEl.textContent = 'Ultra-low cost backup model used automatically when your primary model hits quota or rate limits.';
     }
   }
 
@@ -2338,6 +2384,15 @@
   if (geminiSttSelect) {
     geminiSttSelect.addEventListener('change', () => {
       settings.geminiSttModel = geminiSttSelect.value;
+      populateGeminiSttFallbackModels(cachedGeminiSttModels || GEMINI_STT_FALLBACK_MODELS, settings.geminiSttFallbackModel);
+      void saveSettings();
+    });
+  }
+  const geminiSttFallbackSelect = $('#gemini-stt-fallback-select');
+  if (geminiSttFallbackSelect) {
+    geminiSttFallbackSelect.addEventListener('change', () => {
+      settings.geminiSttFallbackModel = geminiSttFallbackSelect.value;
+      updateFallbackDescription();
       void saveSettings();
     });
   }
@@ -2534,6 +2589,7 @@
     settings.baseUrl = $('#base-url').value.trim();
     settings.apiKeys.gemini = $('#key-gemini').value.trim();
     if ($('#gemini-stt-model-select')) settings.geminiSttModel = $('#gemini-stt-model-select').value;
+    if ($('#gemini-stt-fallback-select')) settings.geminiSttFallbackModel = $('#gemini-stt-fallback-select').value;
     settings.apiKeys.deepgram = $('#key-deepgram').value.trim();
     settings.apiKeys.ollama = $('#key-ollama').value.trim();
     settings.apiKeys.minimax = $('#key-minimax').value.trim();

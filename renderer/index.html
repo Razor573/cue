@@ -359,6 +359,14 @@
           <div class="s-note">Choose which Gemini speech-to-text model transcribes live microphone and meeting audio.</div>
         </div>
 
+        <div id="gemini-stt-fallback-row" class="s-field">
+          <label class="s-label" for="gemini-stt-fallback-select">Fallback transcription model <span class="s-hint">used automatically if primary hits 429 quota or fails</span></label>
+          <div class="s-input-group" style="width:100%;">
+            <select class="s-select" id="gemini-stt-fallback-select" style="width:100%;"></select>
+          </div>
+          <div id="gemini-stt-fallback-desc" class="s-note"></div>
+        </div>
+
         <label class="s-label">Meeting audio <span class="s-hint">transcribe the other side of a call</span></label>
         <div class="s-seg" id="meeting-audio-seg">
           <button data-meeting-audio="off">Off</button>

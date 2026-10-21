@@ -27,14 +27,16 @@ const GEMINI_TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
 // interim hypotheses plus a final on each pause. Used by GeminiLiveSTT in
 // stt-streaming.js; the batch model above is the fallback when it fails.
 const GEMINI_TRANSCRIBE_LIVE_MODEL = 'gemini-3.5-transcribe-live';
+const GEMINI_TRANSCRIBE_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 const GEMINI_STT_MODELS = [
-  { id: 'gemini-3.5-transcribe', label: 'Gemini 3.5 Transcribe (Default transcription engine)' },
-  { id: 'gemini-3.5-transcribe-live', label: 'Gemini 3.5 Transcribe Live (Streaming low-latency)' },
-  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Multimodal audio transcription)' },
-  { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash (Multimodal audio transcription)' },
-  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Fast audio transcription)' },
-  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite (Ultralight transcription)' },
-  { id: 'gemini-4-argon', label: 'Gemini 4 Argon (High-precision transcription)' }
+  { id: 'gemini-3.5-transcribe', label: 'Gemini 3.5 Transcribe · Fast (~400ms) · Dedicated ASR word-level accuracy · $0.31/hr (10 RPM)' },
+  { id: 'gemini-3.5-transcribe-live', label: 'Gemini 3.5 Transcribe Live · Sub-second streaming · Real-time live accuracy · $0.54/hr' },
+  { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live · Instant (~200ms) · Conversational voice audio · $1.35/hr' },
+  { id: 'gemini-3.8-live-extended-thinking', label: 'Gemini 3.8 Live Extended Thinking · Instant (~200ms) + reasoning · Deep voice comprehension · $2.10/hr' },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · Ultra-fast (~300ms) · Good accuracy · $0.05/hr (4,000 RPM, safest against 429s)' },
+  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash · Very fast (~500ms) · High accuracy & context understanding · $0.11/hr' },
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · Fast (~450ms) · Balanced accuracy & speed · $0.08/hr' },
+  { id: 'gemini-3.5-live-translate-preview', label: 'Gemini 3.5 Live Translate · Low latency · Speech translation & multilingual voice · $0.54/hr' }
 ];
 
 async function listGeminiSTTModels(apiKey, fetchImpl = fetch) {
@@ -53,7 +55,7 @@ async function listGeminiSTTModels(apiKey, fetchImpl = fetch) {
         const apiModels = (data.models || [])
           .map((m) => String(m.name || '').replace(/^models\//, '').trim())
           .filter((id) => /^gemini-[34]/i.test(id) && !DEAD_GEMINI_MODEL_RE.test(id))
-          .filter((id) => /transcribe|audio|flash|argon/i.test(id) && !/embedding|imagen|veo|tts/i.test(id));
+          .filter((id) => /transcribe|audio|live/i.test(id) && !/pro|argon|embedding|imagen|veo|tts/i.test(id));
         for (const id of apiModels) {
           if (!byId.has(id)) {
             byId.set(id, { id, label: id });
@@ -1142,6 +1144,7 @@ module.exports = {
   CURRENT_GEMINI_DEFAULT,
   GEMINI_TRANSCRIBE_MODEL,
   GEMINI_TRANSCRIBE_LIVE_MODEL,
+  GEMINI_TRANSCRIBE_FALLBACK_MODEL,
   CURRENT_ANTHROPIC_DEFAULT_FAST,
   CURRENT_ANTHROPIC_DEFAULT_SMART,
   PUBLIK_PROVIDER,

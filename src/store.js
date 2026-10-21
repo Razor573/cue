@@ -46,6 +46,7 @@ const DEFAULTS = {
   vertexThinkingLevel: 'LOW',
   vertexWebSearch: false,
   geminiSttModel: 'gemini-3.5-transcribe',
+  geminiSttFallbackModel: 'gemini-3.5-flash-lite',
   // publik API (packaged-build default). apiKeys.publik holds the minted key;
   // everything here is state the main process owns — the renderer only reads
   // a redacted view of it through publik:state and can never write it.

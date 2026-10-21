@@ -2,7 +2,7 @@
 // no audio API — we transcribe with whatever audio-capable key is available, and
 // fall back across providers. Returns { text, provider } or { text:'', error }.
 const { pcmToWav } = require('./wav');
-const { formatProviderErrorMessage, isQuotaError, isRateLimitError, isNotFoundError, resolveGeminiModel, CURRENT_GEMINI_DEFAULT, GEMINI_TRANSCRIBE_MODEL } = require('./llm');
+const { formatProviderErrorMessage, isQuotaError, isRateLimitError, isNotFoundError, resolveGeminiModel, CURRENT_GEMINI_DEFAULT, GEMINI_TRANSCRIBE_MODEL, GEMINI_TRANSCRIBE_FALLBACK_MODEL } = require('./llm');
 
 const BASE_VOCAB = 'CI/CD, Docker, Kubernetes, Terraform, Jenkins, AWS, Azure, GCP, ' +
   'CodeCommit, CodePipeline, CodeBuild, CodeDeploy, DevOps, SRE, microservices, deployment, ' +
@@ -70,16 +70,20 @@ const TRANSCRIBE_MODEL_COOLDOWN_MS = 60000;
 let transcribeModelDownUntil = 0;
 
 // Split from transcribeGemini so tests can pass a fake client.
-async function transcribeGeminiWith(ai, wav, modelOrNow, maybeNow) {
+async function transcribeGeminiWith(ai, wav, modelOrNow, maybeNowOrFallback, maybeNow) {
   let primaryModel = GEMINI_TRANSCRIBE_MODEL;
+  let fallbackModel = GEMINI_TRANSCRIBE_FALLBACK_MODEL;
   let now = Date.now();
   if (typeof modelOrNow === 'number') {
     now = modelOrNow;
   } else if (typeof modelOrNow === 'string' && modelOrNow) {
     primaryModel = modelOrNow;
+  }
+  if (typeof maybeNowOrFallback === 'string' && maybeNowOrFallback) {
+    fallbackModel = maybeNowOrFallback;
     if (typeof maybeNow === 'number') now = maybeNow;
-  } else if (typeof maybeNow === 'number') {
-    now = maybeNow;
+  } else if (typeof maybeNowOrFallback === 'number') {
+    now = maybeNowOrFallback;
   }
   const audio = { inlineData: { mimeType: 'audio/wav', data: wav.toString('base64') } };
   if (now >= transcribeModelDownUntil) {
@@ -99,7 +103,7 @@ async function transcribeGeminiWith(ai, wav, modelOrNow, maybeNow) {
     }
   }
   const res = await ai.models.generateContent({
-    model: CURRENT_GEMINI_DEFAULT,
+    model: fallbackModel || GEMINI_TRANSCRIBE_FALLBACK_MODEL,
     contents: [{ role: 'user', parts: [
       { text: 'Transcribe this audio verbatim. Return only the spoken words with no commentary. If there is no clear speech, return an empty response.' },
       audio
@@ -131,7 +135,8 @@ function createSTT(settings) {
   if ((selectedProvider === 'auto' || selectedProvider === 'gemini') && keys.gemini) {
     const model = resolveGeminiModel(settings);
     const transcribeModel = settings.geminiSttModel || GEMINI_TRANSCRIBE_MODEL;
-    chain.push({ p: 'gemini', m: model, fn: (wav) => transcribeGemini(keys.gemini, wav, transcribeModel) });
+    const fallbackModel = settings.geminiSttFallbackModel || GEMINI_TRANSCRIBE_FALLBACK_MODEL;
+    chain.push({ p: 'gemini', m: model, fn: (wav) => transcribeGemini(keys.gemini, wav, transcribeModel, fallbackModel) });
   }
   // Custom (OpenAI-compatible) endpoint: same shape as the Groq branch above,
   // just pointed at the user's own Base URL. Deliberately NOT part of 'auto' —
@@ -186,4 +191,4 @@ function createSTT(settings) {
   };
 }
 
-module.exports = { createSTT, looksLikeHallucination, buildVocabPrompt, transcribeGemini, transcribeGeminiWith, extractGeminiTranscript };
+module.exports = { createSTT, looksLikeHallucination, buildVocabPrompt, transcribeGemini, transcribeGeminiWith, extractGeminiTranscript, GEMINI_TRANSCRIBE_FALLBACK_MODEL };

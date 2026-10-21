@@ -3,7 +3,7 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const { extractGeminiTranscript, transcribeGeminiWith } = require('../src/stt');
-const { GEMINI_TRANSCRIBE_MODEL, CURRENT_GEMINI_DEFAULT } = require('../src/llm');
+const { GEMINI_TRANSCRIBE_MODEL, CURRENT_GEMINI_DEFAULT, GEMINI_TRANSCRIBE_FALLBACK_MODEL } = require('../src/llm');
 
 const candidate = (parts) => ({ candidates: [{ content: { parts, role: 'model' }, finishReason: 'STOP' }] });
 
@@ -74,16 +74,16 @@ test('transcribeGemini uses the transcribe model with no instruction prompt when
 });
 
 test('a 429 on the transcribe model falls through to the chat model for the same clip, then stays there for a minute', async () => {
-  const ai = fakeClient({ [GEMINI_TRANSCRIBE_MODEL]: quota429, [CURRENT_GEMINI_DEFAULT]: chatted });
+  const ai = fakeClient({ [GEMINI_TRANSCRIBE_MODEL]: quota429, [GEMINI_TRANSCRIBE_FALLBACK_MODEL]: chatted });
   const t0 = nextMinute();
   assert.equal(await transcribeGeminiWith(ai, wav, t0), 'from flash');
-  assert.deepEqual(ai.calls.map((c) => c.model), [GEMINI_TRANSCRIBE_MODEL, CURRENT_GEMINI_DEFAULT]);
+  assert.deepEqual(ai.calls.map((c) => c.model), [GEMINI_TRANSCRIBE_MODEL, GEMINI_TRANSCRIBE_FALLBACK_MODEL]);
   // Chat model path carries the instruction prompt in front of the audio.
   assert.equal(typeof ai.calls[1].contents[0].parts[0].text, 'string');
 
   ai.calls.length = 0;
   assert.equal(await transcribeGeminiWith(ai, wav, t0 + 30000), 'from flash');
-  assert.deepEqual(ai.calls.map((c) => c.model), [CURRENT_GEMINI_DEFAULT], 'must not re-hit the parked model inside the cooldown');
+  assert.deepEqual(ai.calls.map((c) => c.model), [GEMINI_TRANSCRIBE_FALLBACK_MODEL], 'must not re-hit the parked model inside the cooldown');
 
   ai.calls.length = 0;
   ai.models.generateContent = async (req) => { ai.calls.push(req); return req.model === GEMINI_TRANSCRIBE_MODEL ? transcribed : chatted; };
@@ -91,13 +91,13 @@ test('a 429 on the transcribe model falls through to the chat model for the same
 });
 
 test('a 404 on the transcribe model also degrades to the chat model', async () => {
-  const ai = fakeClient({ [GEMINI_TRANSCRIBE_MODEL]: gone404, [CURRENT_GEMINI_DEFAULT]: chatted });
+  const ai = fakeClient({ [GEMINI_TRANSCRIBE_MODEL]: gone404, [GEMINI_TRANSCRIBE_FALLBACK_MODEL]: chatted });
   assert.equal(await transcribeGeminiWith(ai, wav, nextMinute()), 'from flash');
 });
 
 test('other transcribe-model failures propagate instead of being masked by the fallback', async () => {
   const badKey = Object.assign(new Error('API key not valid'), { status: 400 });
-  const ai = fakeClient({ [GEMINI_TRANSCRIBE_MODEL]: badKey, [CURRENT_GEMINI_DEFAULT]: chatted });
+  const ai = fakeClient({ [GEMINI_TRANSCRIBE_MODEL]: badKey, [GEMINI_TRANSCRIBE_FALLBACK_MODEL]: chatted });
   await assert.rejects(() => transcribeGeminiWith(ai, wav, nextMinute()), /API key not valid/);
   assert.deepEqual(ai.calls.map((c) => c.model), [GEMINI_TRANSCRIBE_MODEL]);
 });
