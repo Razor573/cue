@@ -275,7 +275,7 @@
       pill.classList.add('hidden');
     } else {
       pill.classList.remove('hidden');
-      pill.textContent = `[${historyIndex + 1}/${responseHistory.length}]`;
+      pill.textContent = `${historyIndex + 1} / ${responseHistory.length}`;
     }
   }
 
@@ -2938,10 +2938,10 @@
     pill.classList.toggle('unlocked', isInteractive);
     const text = pill.querySelector('.pill-text');
     if (isInteractive) {
-      if (text) text.textContent = 'INTERACTIVE';
+      if (text) text.textContent = 'Interactive';
       pill.title = 'Interactive mode enabled (Ctrl+Shift+, to lock pass-through)';
     } else {
-      if (text) text.textContent = 'PASS-THROUGH';
+      if (text) text.textContent = 'Pass-Through';
       pill.title = 'Pass-through mode active (Ctrl+Shift+, to unlock clicking)';
     }
     updateUnlockBanner();
