@@ -221,7 +221,7 @@ html, body {
 .mic-perm-actions button.dismiss:hover { background: rgba(255, 255, 255, 0.10); color: var(--tx-2); }
 
 /* ============================ Panel ============================ */
-#panel-wrap { position: relative; margin-top: 12px; width: 624px; }
+#panel-wrap { position: relative; margin-top: 12px; width: 100%; max-width: var(--main-w); }
 button:focus { outline: none; }
 #live-dot {
   position: absolute; top: -3px; left: -5px; z-index: 4;
@@ -327,8 +327,8 @@ button:focus { outline: none; }
 
 /* ============================ Action row ============================ */
 #action-row {
-  display: flex; align-items: center; flex-wrap: nowrap; gap: 6px;
-  margin-top: 8px; white-space: nowrap;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 8px;
 }
 .act {
   display: inline-flex; align-items: center; gap: 6px;
