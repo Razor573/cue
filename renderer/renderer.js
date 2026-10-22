@@ -295,7 +295,7 @@
       const tText = dur ? `Thought for ${dur}s` : 'Thinking process';
       card.innerHTML = `
         <div class="thinking-header">
-          <span class="thinking-sparkle">✨</span>
+          <span class="thinking-dot"></span>
           <span class="thinking-title">${esc(tText)}</span>
           <span class="thinking-chev">▼</span>
         </div>
@@ -1473,7 +1473,7 @@
     thinkingEl.className = 'thinking-card expanded';
     thinkingEl.innerHTML = `
       <div class="thinking-header">
-        <span class="thinking-sparkle">✨</span>
+        <span class="thinking-dot"></span>
         <span class="thinking-title">Thinking… (0s)</span>
         <span class="thinking-chev">▼</span>
       </div>
@@ -1590,6 +1590,15 @@
   // Transcript of a meeting resumed at launch: sidebar rows only — no
   // auto-fill of the input box, which is for live speech.
   cue.on('transcript:restore', ({ turns }) => {
+    if (!turns || turns.length === 0) {
+      const turnsEl = document.getElementById('live-transcript-turns');
+      if (turnsEl) turnsEl.innerHTML = '';
+      const listEl = document.getElementById('ts-list');
+      if (listEl) {
+        listEl.innerHTML = '<div class="ts-placeholder">Conversation history will appear here when listening.</div>';
+      }
+      return;
+    }
     for (const t of turns || []) {
       if (!t || !t.text || t.text.trim().length < 2) continue;
       appendTranscriptHistoryTurn(t.channel, t.text, false);
@@ -2927,15 +2936,12 @@
     if (!pill) return;
     pill.classList.toggle('locked', !isInteractive);
     pill.classList.toggle('unlocked', isInteractive);
-    const lockIcon = pill.querySelector('.pill-lock-icon');
     const text = pill.querySelector('.pill-text');
     if (isInteractive) {
-      if (lockIcon) lockIcon.textContent = '🔓';
-      if (text) text.textContent = 'Interactive';
+      if (text) text.textContent = 'INTERACTIVE';
       pill.title = 'Interactive mode enabled (Ctrl+Shift+, to lock pass-through)';
     } else {
-      if (lockIcon) lockIcon.textContent = '🔒';
-      if (text) text.textContent = 'Pass-through';
+      if (text) text.textContent = 'PASS-THROUGH';
       pill.title = 'Pass-through mode active (Ctrl+Shift+, to unlock clicking)';
     }
     updateUnlockBanner();

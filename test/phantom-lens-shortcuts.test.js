@@ -135,6 +135,7 @@ test('Unit 2: main.js registers all Phantom Lens global shortcuts and IPC handle
   const requiredShortcuts = [
     'CommandOrControl+Enter',
     'CommandOrControl+Shift+Enter',
+    'CommandOrControl+Shift+Alt+M',
     'CommandOrControl+K',
     'CommandOrControl+R',
     'CommandOrControl+,',

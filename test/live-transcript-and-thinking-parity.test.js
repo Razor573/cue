@@ -129,12 +129,10 @@ test('Unit 4: DOM Elements in renderer/index.html and Liquid Glass CSS in styles
   assert.match(htmlSrc, /id="live-transcript-turns"\s+class="live-transcript-turns"/);
   assert.match(htmlSrc, /id="live-interim-bubble"\s+class="live-interim-bubble hidden"/);
 
-  // Verification that live-transcript-feed is inside panel-main before action-row
+  // Verification that live-transcript-feed is a side column inside panel-columns
+  const panelColumnsIdx = htmlSrc.indexOf('id="panel-columns"');
   const feedIdx = htmlSrc.indexOf('id="live-transcript-feed"');
-  const actionRowIdx = htmlSrc.indexOf('id="action-row"');
-  const messagesIdx = htmlSrc.indexOf('id="messages"');
-  assert.ok(feedIdx > messagesIdx, 'live-transcript-feed must be after messages');
-  assert.ok(feedIdx < actionRowIdx, 'live-transcript-feed must be before action-row');
+  assert.ok(panelColumnsIdx > -1 && feedIdx > panelColumnsIdx, 'live-transcript-feed must be inside panel-columns');
 
   // Session instructions UI in Style settings
   assert.match(htmlSrc, /data-pane="style"/);

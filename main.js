@@ -181,11 +181,11 @@ function isTextualEcho(youText, recentThemTurns) {
   if (!youWords.length) return false;
   for (const { text: themText } of recentThemTurns) {
     const cleanThem = String(themText || '').toLowerCase().replace(/[^\w\s]/g, '').trim();
-    if (cleanThem.includes(cleanYou)) return true;
+    if (!cleanThem) continue;
+    if (cleanThem.includes(cleanYou) || cleanYou.includes(cleanThem)) return true;
     const themWords = new Set(cleanThem.split(/\s+/).filter(Boolean));
     const matchCount = youWords.filter(w => themWords.has(w)).length;
-    if (youWords.length <= 3 && matchCount === youWords.length) return true;
-    if (youWords.length > 3 && (matchCount / youWords.length) >= 0.7) return true;
+    if ((matchCount / youWords.length) >= 0.5) return true;
   }
   return false;
 }
@@ -198,7 +198,7 @@ function pushTranscript(turn) {
     crossTalkState.recentThemTurns.push({ text: turn.text.toLowerCase().trim(), ts: now });
     if (crossTalkState.recentThemTurns.length > 8) crossTalkState.recentThemTurns.shift();
   } else if (turn.channel === 'you') {
-    crossTalkState.recentThemTurns = crossTalkState.recentThemTurns.filter(t => (now - t.ts) < 3500);
+    crossTalkState.recentThemTurns = crossTalkState.recentThemTurns.filter(t => (now - t.ts) < 8000);
     if (isTextualEcho(turn.text, crossTalkState.recentThemTurns)) {
       console.log(`[audio] suppressed acoustic echo on you channel: "${turn.text}"`);
       return false;
@@ -523,6 +523,7 @@ function initStreamingSTT() {
       },
       onInterim: (ch, text) => {
         if (instance && streamingSTT[ch] !== instance) return;
+        if (ch === 'you' && (Date.now() - crossTalkState.themLastActiveTs < 1000)) return;
         send('stt:interim', { channel: ch, text });
       },
       onError: (err) => {
@@ -716,18 +717,18 @@ function routeAudio(channel, pcmBuffer) {
 
   if (channel === 'them') {
     const themRms = rms16(buf);
-    if (themRms > 140) {
+    if (themRms > 80) {
       crossTalkState.themLastActiveTs = Date.now();
-      crossTalkState.themRecentRms = Math.max(crossTalkState.themRecentRms * 0.7, themRms);
+      crossTalkState.themRecentRms = Math.max(crossTalkState.themRecentRms * 0.85, themRms);
     }
   } else if (channel === 'you') {
     const now = Date.now();
     const youRms = rms16(buf);
-    const themActive = (now - crossTalkState.themLastActiveTs < 450);
+    const themActive = (now - crossTalkState.themLastActiveTs < 1000);
     if (themActive) {
       // Speaker bleed detection: if 'you' audio energy is less than speaker loopback or below the elevated gate,
       // it is acoustic leakage from laptop speakers into the microphone. Drop it.
-      const isBleed = (youRms < crossTalkState.themRecentRms * 0.85) || (youRms < RMS_GATE * 2.0);
+      const isBleed = (youRms < crossTalkState.themRecentRms * 0.95) || (youRms < RMS_GATE * 2.2);
       if (isBleed) {
         // Acoustic echo suppressed - do not push to buffers or send to streaming STT
         return;
@@ -1564,6 +1565,8 @@ const APP_SHORTCUT_KEYS = [
   'CommandOrControl+Shift+Return',
   'CommandOrControl+Shift+L',
   'CommandOrControl+Shift+M',
+  'CommandOrControl+Shift+Alt+M',
+  'CommandOrControl+Alt+Shift+M',
   'CommandOrControl+Shift+K',
   'CommandOrControl+K',
   'CommandOrControl+R',
@@ -1641,6 +1644,24 @@ function registerAppShortcuts() {
     if (meetingMemory) meetingMemory.end().catch(() => {});
     send('transcript:restore', { turns: [] });
     send('status', { message: 'Conversation cleared.' });
+  });
+  globalShortcut.register('CommandOrControl+Shift+Alt+M', () => {
+    if (!isOverlayVisible()) return;
+    transcript.length = 0;
+    buffers.you = [];
+    buffers.them = [];
+    if (meetingMemory) meetingMemory.end().catch(() => {});
+    send('transcript:restore', { turns: [] });
+    send('status', { message: 'Transcript history cleared.' });
+  });
+  globalShortcut.register('CommandOrControl+Alt+Shift+M', () => {
+    if (!isOverlayVisible()) return;
+    transcript.length = 0;
+    buffers.you = [];
+    buffers.them = [];
+    if (meetingMemory) meetingMemory.end().catch(() => {});
+    send('transcript:restore', { turns: [] });
+    send('status', { message: 'Transcript history cleared.' });
   });
 
   // Phantom Lens Core Shortcuts

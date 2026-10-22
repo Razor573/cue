@@ -39,7 +39,7 @@
       <button class="tb-quit" id="quit-btn" title="Quit cue" aria-label="Quit cue"></button>
       <div class="tb-divider"></div>
       <div id="interactive-pill" class="interactive-pill locked" title="Click-through status (Ctrl+Shift+, to toggle)">
-        <span class="pill-lock-icon">🔒</span><span class="pill-text">Pass-through</span>
+        <span class="pill-dot"></span><span class="pill-text">PASS-THROUGH</span>
       </div>
       <div id="history-pill" class="history-pill hidden" title="Response history (Ctrl+Shift+Up/Down)">[0/0]</div>
     </div>
@@ -61,11 +61,6 @@
               <button class="directive-clear" id="directive-clear-btn" title="Clear directive" aria-label="Clear directive">✕</button>
             </div>
             <div id="messages"></div>
-
-            <div id="live-transcript-feed" class="live-transcript-feed">
-              <div id="live-transcript-turns" class="live-transcript-turns"></div>
-              <div id="live-interim-bubble" class="live-interim-bubble hidden"></div>
-            </div>
 
             <div id="action-row">
               <button class="act act-primary" data-mode="say"
@@ -103,6 +98,16 @@
             </div>
           </div>
 
+          <!-- Right side column: Live transcript feed -->
+          <div id="live-transcript-feed" class="live-transcript-feed">
+            <div class="live-feed-header">
+              <span class="live-feed-dot"></span>
+              <span class="live-feed-title">LIVE SPEECH</span>
+            </div>
+            <div id="live-transcript-turns" class="live-transcript-turns"></div>
+            <div id="live-interim-bubble" class="live-interim-bubble hidden"></div>
+          </div>
+
         </div><!-- /panel-columns -->
       </div>
 
@@ -131,17 +136,17 @@
       </div>
 
       <div id="settings-unlock-banner" class="settings-unlock-banner">
-        <span class="unlock-icon">🔒</span>
+        <span class="unlock-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg></span>
         <span class="unlock-text">Pass-through clicking is active. Press <span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">,</span> to unlock clicking.</span>
       </div>
 
       <!-- Tab bar -->
       <div class="s-tabs">
-        <button class="s-tab on" data-tab="keys">🔑 API Keys</button>
-        <button class="s-tab" data-tab="profile">👤 Profile</button>
-        <button class="s-tab" data-tab="transcription">🔉 Audio</button>
-        <button class="s-tab" data-tab="style">✨ Style</button>
-        <button class="s-tab" data-tab="hotkeys">⌨️ Hotkeys</button>
+        <button class="s-tab on" data-tab="keys">API Keys</button>
+        <button class="s-tab" data-tab="profile">Profile</button>
+        <button class="s-tab" data-tab="transcription">Sound</button>
+        <button class="s-tab" data-tab="style">Style</button>
+        <button class="s-tab" data-tab="hotkeys">Hotkeys</button>
       </div>
 
       <!-- Tab: Keys -->
@@ -533,6 +538,10 @@
             <div class="hotkey-row">
               <span class="hotkey-desc">Toggle live meeting &amp; microphone listening</span>
               <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">L</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Clear transcript history</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">Alt</span><span class="keycap">M</span></span>
             </div>
           </div>
         </div>
