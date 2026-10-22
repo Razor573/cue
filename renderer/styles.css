@@ -248,10 +248,15 @@ button:focus { outline: none; }
   border-radius: var(--r-panel);
   box-shadow: var(--specular-top), 0 20px 50px rgba(0, 0, 0, 0.48), 0 4px 16px rgba(0, 0, 0, 0.28);
 }
+#panel-columns {
+  position: relative;
+  width: 100%;
+}
 #panel {
   position: relative; z-index: 1; padding: 16px 20px;
   animation: overlayIn 260ms var(--ease-fluid);
   display: flex; flex-direction: column; max-height: calc(100vh - 40px);
+  width: 100%;
 }
 #panel-wrap.collapsed { display: none; }
 
@@ -856,21 +861,6 @@ button:focus { outline: none; }
 .ob-primary { border: none; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; padding: 9px 22px; border-radius: 999px; cursor: pointer; transition: filter 150ms var(--ease-fluid); }
 .ob-primary:hover { filter: brightness(1.08); }
 
-/* ============================ Two-column panel layout ============================ */
-#panel-columns {
-  display: flex;
-  flex-direction: row;
-  gap: 14px;
-  align-items: stretch;
-  width: 100%;
-}
-#panel-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
 
 .transcript-sidebar, .tx-sidebar {
   position: absolute;
@@ -1436,19 +1426,29 @@ button:focus { outline: none; }
   opacity: 1;
 }
 
-/* Live transcript feed as a dedicated side column */
+/* Live transcript feed outside the main window as a dedicated companion card */
 .live-transcript-feed {
-  width: 220px;
-  flex-shrink: 0;
+  position: absolute;
+  top: 0;
+  right: calc(100% + 14px);
+  width: 272px;
+  max-height: min(480px, calc(100vh - 40px));
   display: flex;
   flex-direction: column;
-  max-height: 400px;
-  background: rgba(18, 23, 35, 0.55);
+  background: linear-gradient(165deg, rgba(22, 28, 44, 0.90) 0%, rgba(14, 18, 28, 0.92) 100%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
   border: 1px solid var(--border);
   border-radius: var(--r-16);
-  padding: 10px;
+  padding: 12px 10px 10px;
   margin: 0;
-  box-shadow: var(--specular-top), 0 4px 16px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--specular-top), 0 16px 44px rgba(0, 0, 0, 0.45), 0 4px 16px rgba(0, 0, 0, 0.25);
+  z-index: 10;
+  transition: transform 180ms var(--ease-spring), opacity 150ms ease;
+}
+.live-transcript-feed.right {
+  right: auto;
+  left: calc(100% + 14px);
 }
 .live-feed-header {
   display: flex;
@@ -1470,6 +1470,28 @@ button:focus { outline: none; }
   background: var(--green);
   box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
   transform: translateY(-0.5px);
+}
+.live-feed-btn {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--tx-mut);
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 0;
+  transition: color 140ms ease, background 140ms ease;
+}
+.live-feed-btn:hover {
+  color: #fff;
+  background: var(--bg-glass-hover);
+}
+.live-feed-btn:active {
+  transform: scale(0.92);
 }
 .live-transcript-feed:not(:has(.live-turn)):not(:has(#live-interim-bubble:not(.hidden))) {
   display: none;

@@ -48,66 +48,61 @@
     <div id="panel-wrap">
       <span id="live-dot" class="off"></span>
       <div id="stt-status" class="stt-status stt-disconnected">Transcription off</div>
-      <div id="panel" class="glass no-drag">
+      <div id="panel-columns">
+        <div id="panel" class="glass no-drag">
+          <div id="directive-badge" class="directive-badge hidden">
+            <span class="directive-icon">⚡</span>
+            <span class="directive-text"></span>
+            <button class="directive-clear" id="directive-clear-btn" title="Clear directive" aria-label="Clear directive">✕</button>
+          </div>
+          <div id="messages"></div>
 
-        <!-- Two-column layout: responses (left) + live transcript sidebar (right) -->
-        <div id="panel-columns">
-
-          <!-- Left column: AI responses -->
-          <div id="panel-main">
-            <div id="directive-badge" class="directive-badge hidden">
-              <span class="directive-icon">⚡</span>
-              <span class="directive-text"></span>
-              <button class="directive-clear" id="directive-clear-btn" title="Clear directive" aria-label="Clear directive">✕</button>
-            </div>
-            <div id="messages"></div>
-
-            <div id="action-row">
-              <button class="act act-primary" data-mode="say"
-                title="Suggests what to say next based on the conversation">
-                <span class="ic"></span><span>What should I say?</span>
-                <span class="shortcut-hint" id="say-shortcut-hint"></span>
-              </button>
-              <button class="act act-secondary" data-mode="assist"
-                title="Scans your screen and conversation to decide what you need">
-                <span class="ic"></span><span>Smart assist</span>
-                <span class="shortcut-hint" id="assist-shortcut-hint"></span>
-              </button>
-              <button class="act" data-mode="recap"><span class="ic"></span><span>Recap</span></button>
-            </div>
-
-            <div id="composer">
-              <div id="stealth-typing-badge" class="stealth-typing-badge hidden">
-                <span class="stealth-dot"></span>
-                <span>Stealth typing active · Keys swallowed from OS</span>
-              </div>
-              <div id="attached-files-bar" class="attached-files-bar hidden"></div>
-              <div id="input-area">
-                <div id="placeholder">Ask about your screen or conversation, or <span class="keycap">⌘</span><span class="keycap">⇧</span><span class="keycap">⏎</span> for Smart assist</div>
-                <textarea id="input" rows="1" spellcheck="false"></textarea>
-              </div>
-              <div id="composer-bottom">
-                <button id="smart-toggle" class="smart-pill"><span class="ic"></span><span>Smart</span></button>
-                <button id="history-btn" class="history-btn" title="Show everything said this session"><span class="ic"></span><span>Transcription history</span></button>
-                <button id="more-btn" class="more-btn" title="Settings"></button>
-                <div class="spacer"></div>
-                <button id="send-btn" title="Send"></button>
-              </div>
-            </div>
+          <div id="action-row">
+            <button class="act act-primary" data-mode="say"
+              title="Suggests what to say next based on the conversation">
+              <span class="ic"></span><span>What should I say?</span>
+              <span class="shortcut-hint" id="say-shortcut-hint"></span>
+            </button>
+            <button class="act act-secondary" data-mode="assist"
+              title="Scans your screen and conversation to decide what you need">
+              <span class="ic"></span><span>Smart assist</span>
+              <span class="shortcut-hint" id="assist-shortcut-hint"></span>
+            </button>
+            <button class="act" data-mode="recap"><span class="ic"></span><span>Recap</span></button>
           </div>
 
-          <!-- Right side column: Live transcript feed -->
-          <div id="live-transcript-feed" class="live-transcript-feed">
-            <div class="live-feed-header">
-              <span class="live-feed-dot"></span>
-              <span class="live-feed-title">LIVE SPEECH</span>
+          <div id="composer">
+            <div id="stealth-typing-badge" class="stealth-typing-badge hidden">
+              <span class="stealth-dot"></span>
+              <span>Stealth typing active · Keys swallowed from OS</span>
             </div>
-            <div id="live-transcript-turns" class="live-transcript-turns"></div>
-            <div id="live-interim-bubble" class="live-interim-bubble hidden"></div>
+            <div id="attached-files-bar" class="attached-files-bar hidden"></div>
+            <div id="input-area">
+              <div id="placeholder">Ask about your screen or conversation, or <span class="keycap">⌘</span><span class="keycap">⇧</span><span class="keycap">⏎</span> for Smart assist</div>
+              <textarea id="input" rows="1" spellcheck="false"></textarea>
+            </div>
+            <div id="composer-bottom">
+              <button id="smart-toggle" class="smart-pill"><span class="ic"></span><span>Smart</span></button>
+              <button id="history-btn" class="history-btn" title="Show everything said this session"><span class="ic"></span><span>Transcription history</span></button>
+              <button id="more-btn" class="more-btn" title="Settings"></button>
+              <div class="spacer"></div>
+              <button id="send-btn" title="Send"></button>
+            </div>
           </div>
+        </div><!-- /panel -->
 
-        </div><!-- /panel-columns -->
-      </div>
+        <!-- Live transcript feed outside the main window as a dedicated companion card -->
+        <div id="live-transcript-feed" class="live-transcript-feed">
+          <div class="live-feed-header">
+            <span class="live-feed-dot"></span>
+            <span class="live-feed-title">LIVE SPEECH</span>
+            <div class="spacer"></div>
+            <button type="button" id="live-feed-side-btn" class="live-feed-btn" title="Switch side (Left / Right)">⇄</button>
+          </div>
+          <div id="live-transcript-turns" class="live-transcript-turns"></div>
+          <div id="live-interim-bubble" class="live-interim-bubble hidden"></div>
+        </div>
+      </div><!-- /panel-columns -->
 
       <!-- Transcript history sidebar — slides out from behind the panel's right edge -->
       <div id="transcript-sidebar" class="transcript-sidebar">

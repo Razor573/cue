@@ -1236,6 +1236,27 @@
     closeSidebarBtn.addEventListener('click', hideSidebar);
   }
 
+  // Live transcript feed companion card: side toggle & auto-positioning
+  const liveFeedSideBtn = document.getElementById('live-feed-side-btn');
+  const liveFeed = document.getElementById('live-transcript-feed');
+  if (liveFeedSideBtn && liveFeed) {
+    liveFeedSideBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      liveFeed.classList.toggle('right');
+    });
+  }
+
+  function updateLiveFeedPosition() {
+    if (!liveFeed) return;
+    const panel = document.getElementById('panel');
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    if (rect.left < 286) {
+      liveFeed.classList.add('right');
+    }
+  }
+  window.addEventListener('resize', updateLiveFeedPosition, { passive: true });
+
   function appendTranscriptHistoryTurn(channel, text, isInterim) {
     const list = document.getElementById('ts-list');
     if (!list) return;
@@ -1349,15 +1370,12 @@
     if (!interimEl) {
       interimEl = document.createElement('div');
       interimEl.className = 'interim-transcript';
-      // Insert into panel-main (the left column), before the action row
-      const panelMain = document.getElementById('panel-main');
+      const target = document.getElementById('panel-main') || document.getElementById('panel');
       const actionRow = document.getElementById('action-row');
-      if (panelMain && actionRow && actionRow.parentNode === panelMain) {
-        panelMain.insertBefore(interimEl, actionRow);
-      } else if (panelMain) {
-        panelMain.appendChild(interimEl);
-      } else {
-        document.getElementById('panel').appendChild(interimEl);
+      if (target && actionRow && actionRow.parentNode === target) {
+        target.insertBefore(interimEl, actionRow);
+      } else if (target) {
+        target.appendChild(interimEl);
       }
     }
     return interimEl;
@@ -1610,15 +1628,12 @@
     if (!el) {
       el = document.createElement('div');
       el.id = 'cue-status';
-      // Insert into panel-main before the action row
-      const panelMain = document.getElementById('panel-main');
+      const target = document.getElementById('panel-main') || document.getElementById('panel');
       const actionRow = document.getElementById('action-row');
-      if (panelMain && actionRow && actionRow.parentNode === panelMain) {
-        panelMain.insertBefore(el, actionRow);
-      } else if (panelMain) {
-        panelMain.appendChild(el);
-      } else {
-        document.getElementById('panel').appendChild(el);
+      if (target && actionRow && actionRow.parentNode === target) {
+        target.insertBefore(el, actionRow);
+      } else if (target) {
+        target.appendChild(el);
       }
     }
     el.textContent = message;
@@ -2705,7 +2720,7 @@
     // The window trails the cursor while dragging; going click-through then would drop the release.
     if (draggingWindow) return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
-    const overUI = !!(el && el.closest && el.closest('#toolbar, #panel-wrap, #transcript-sidebar, #settings-scrim, #onboard-scrim, #consent-scrim'));
+    const overUI = !!(el && el.closest && el.closest('#toolbar, #panel, #live-transcript-feed, #panel-wrap, #transcript-sidebar, #settings-scrim, #onboard-scrim, #consent-scrim'));
     setIgnore(!overUI);
   });
   setIgnore(true); // start fully click-through; hovering the panel re-enables it
