@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld('cue', {
       'stealth-key', 'toggle-ask-input', 'open-settings', 'settings-unlock',
       'reset-view', 'response:scroll', 'code:scroll', 'history:nav',
       'transparency:toggle', 'interactive:state', 'attached-files', 'emergency:recover',
+      'settings:changed',
       'open-meeting-companion', 'session:directive'
     ];
     if (!allowed.includes(channel)) return;

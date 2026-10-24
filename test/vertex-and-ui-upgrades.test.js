@@ -161,8 +161,10 @@ describe('Unit 1: src/vertex-ai.js core engine', () => {
       requestedUrls.push(url);
       capturedBodies.push(JSON.parse(init.body));
 
-      // Simulate 404 on first region (europe-west1) so it fails over to global
-      if (requestedUrls.length === 1) {
+      // Simulate 404 on the preferred region (europe-west1) so the hedge
+      // fails over to global. Region-based, not order-based: the hedge fires
+      // all candidate regions in parallel.
+      if (url.includes('europe-west1-aiplatform.googleapis.com')) {
         return {
           ok: false,
           status: 404,
@@ -205,7 +207,8 @@ describe('Unit 1: src/vertex-ai.js core engine', () => {
     assert.equal(res.fullText, 'Hello from Vertex AI!');
     assert.equal(res.region, 'global');
     assert.deepEqual(chunks, ['Hello from ', 'Vertex AI!']);
-    assert.equal(requestedUrls.length, 2);
+    // Hedge: preferred + global + us-central1 + europe-west2 all fire.
+    assert.equal(requestedUrls.length, 4);
     assert.match(requestedUrls[0], /europe-west1-aiplatform\.googleapis\.com/);
     assert.match(requestedUrls[1], /aiplatform\.googleapis\.com\/v1beta1\/projects\/cue-vertex-prod\/locations\/global/);
     assert.deepEqual(capturedBodies[0].generationConfig.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true });

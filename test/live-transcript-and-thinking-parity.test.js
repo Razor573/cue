@@ -103,11 +103,15 @@ test('Unit 2: Gemini and Vertex includeThoughts configuration & live thinking st
       mockFetch
     );
 
-    assert.equal(capturedBodies.length, 1);
-    assert.deepEqual(capturedBodies[0].generationConfig.thinkingConfig, {
-      thinkingLevel: 'HIGH',
-      includeThoughts: true
-    });
+    // Hedged regions: the preferred region plus the fallbacks all fire in
+    // parallel, so every captured body must carry the same thinkingConfig.
+    assert.equal(capturedBodies.length, 3);
+    for (const body of capturedBodies) {
+      assert.deepEqual(body.generationConfig.thinkingConfig, {
+        thinkingLevel: 'HIGH',
+        includeThoughts: true
+      });
+    }
     assert.deepEqual(receivedThoughts, ['Reasoning step 1...']);
     assert.deepEqual(receivedTokens, ['Final answer text']);
   });

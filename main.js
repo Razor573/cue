@@ -997,7 +997,9 @@ async function runFeature(mode, userText) {
           onThought: (thoughtText) => {
             if (streamSettled || currentAbort.signal.aborted) return;
             rearm();
-            send('llm:thought', { text: thoughtText });
+            // Empty thoughts are the Vertex keep-alive (see src/vertex-ai.js):
+            // they rearm the watchdog but must never reach the UI.
+            if (thoughtText) send('llm:thought', { text: thoughtText });
           },
           onToken: (t) => {
             if (streamSettled || currentAbort.signal.aborted) return;
@@ -1594,7 +1596,10 @@ const APP_SHORTCUT_KEYS = [
   'CommandOrControl+Shift+O',
   'CommandOrControl+Shift+U',
   'CommandOrControl+H',
-  'CommandOrControl+Shift+/'
+  'CommandOrControl+Shift+/',
+  'CommandOrControl+Shift+Alt+Left',
+  'CommandOrControl+Shift+Alt+Right',
+  'CommandOrControl+Shift+Alt+T'
 ];
 
 function registerVisibilityShortcuts() {
@@ -1605,6 +1610,52 @@ function registerVisibilityShortcuts() {
   } catch (err) {
     console.warn('[cue] Failed to register visibility shortcut:', err);
   }
+}
+
+// -------- provider / thinking hotkeys --------
+// Ctrl+Shift+Alt+Left/Right cycles Gemini <-> Vertex (any other provider jumps
+// to Gemini); Ctrl+Shift+Alt+T cycles the active provider's thinking level
+// (LOW -> MEDIUM -> HIGH -> LOW). Both take effect on the next request: the
+// provider and thinking level are read fresh from settings per request.
+// The renderer refreshes its status pill via 'settings:changed'.
+const PROVIDER_CYCLE = ['gemini', 'vertex'];
+const THINKING_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
+
+function providerLabel(provider) {
+  if (provider === 'vertex') return 'Vertex';
+  if (provider === 'gemini') return 'Gemini';
+  return provider;
+}
+
+function currentProviderModel(settings) {
+  const tier = settings.smart ? 'smart' : 'fast';
+  const entry = settings.models && settings.models[settings.provider];
+  return (entry && entry[tier]) || '';
+}
+
+function cycleProvider(direction) {
+  const settings = store.getSettings();
+  const idx = PROVIDER_CYCLE.indexOf(settings.provider);
+  const next = idx === -1
+    ? 'gemini'
+    : PROVIDER_CYCLE[(idx + direction + PROVIDER_CYCLE.length) % PROVIDER_CYCLE.length];
+  const updated = store.setSettings({ provider: next });
+  const model = currentProviderModel(updated);
+  send('settings:changed', { provider: next });
+  send('status', { message: `Provider: ${providerLabel(next)}${model ? ` · ${model}` : ''}` });
+}
+
+function cycleThinkingLevel() {
+  const settings = store.getSettings();
+  // Vertex has its own level; everything else cycles the Gemini level (the
+  // other half of the pair these hotkeys switch between).
+  const key = settings.provider === 'vertex' ? 'vertexThinkingLevel' : 'geminiThinkingLevel';
+  const cur = String(settings[key] || 'LOW').toUpperCase();
+  const idx = THINKING_LEVELS.indexOf(cur);
+  const next = THINKING_LEVELS[(idx + 1 + THINKING_LEVELS.length) % THINKING_LEVELS.length] || 'LOW';
+  store.setSettings({ [key]: next });
+  send('settings:changed', { [key]: next });
+  send('status', { message: `Thinking: ${next.charAt(0)}${next.slice(1).toLowerCase()}` });
 }
 
 function registerAppShortcuts() {
@@ -1793,6 +1844,20 @@ function registerAppShortcuts() {
   shortcutState.hide = globalShortcut.register('CommandOrControl+Shift+/', () => {
     if (!isOverlayVisible()) return;
     send('hide:toggle', {});
+  });
+
+  // Provider / thinking hotkeys (Gemini <-> Vertex, thinking cycle)
+  globalShortcut.register('CommandOrControl+Shift+Alt+Left', () => {
+    if (!isOverlayVisible()) return;
+    cycleProvider(-1);
+  });
+  globalShortcut.register('CommandOrControl+Shift+Alt+Right', () => {
+    if (!isOverlayVisible()) return;
+    cycleProvider(1);
+  });
+  globalShortcut.register('CommandOrControl+Shift+Alt+T', () => {
+    if (!isOverlayVisible()) return;
+    cycleThinkingLevel();
   });
 
     for (const [name, wasRegistered] of Object.entries(shortcutState)) {

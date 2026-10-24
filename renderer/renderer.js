@@ -242,6 +242,28 @@
 
   // ---- state -------------------------------------------------------------
   let settings = null;
+
+  // Provider pill: the more-btn keeps its id and its click handler
+  // (openSettings), but its content becomes the live provider · model ·
+  // thinking readout instead of the three-dots icon. Refreshed on boot,
+  // after any settings save, and on 'settings:changed' (hotkey switches).
+  function renderProviderPill() {
+    const btn = $('#more-btn');
+    if (!btn || !settings) return;
+    const provider = settings.provider || 'gemini';
+    const tier = settings.smart ? 'smart' : 'fast';
+    const entry = settings.models && settings.models[provider];
+    const model = (entry && entry[tier]) || '';
+    let thinking = '';
+    if (provider === 'vertex') thinking = settings.vertexThinkingLevel || 'LOW';
+    else if (provider === 'gemini') thinking = settings.geminiThinkingLevel || 'LOW';
+    const label = (s) => s.charAt(0) + s.slice(1).toLowerCase();
+    const providerName = provider === 'vertex' ? 'Vertex' : provider === 'gemini' ? 'Gemini' : provider;
+    const parts = [providerName, model, thinking ? label(thinking) : ''].filter(Boolean);
+    btn.textContent = parts.join(' · ');
+    btn.title = 'Settings (Ctrl+Shift+Alt+Left/Right switches provider, Ctrl+Shift+Alt+T cycles thinking)';
+    btn.classList.add('provider-pill');
+  }
   // Redacted view of the publik API state (never the key), from main via
   // cue.publikState() at boot and the publik:state push thereafter.
   let publikState = null;
@@ -2671,6 +2693,7 @@
     if (opacitySlider) settings.opacity = clampOpacity(Number(opacitySlider.value) / 100);
     try {
       settings = await cue.settingsSet(settings);
+      renderProviderPill();
       $('#s-status').textContent = statusText();
       updateSmartTooltip();
       return true;
@@ -3149,8 +3172,14 @@
   });
 
   // ---- boot --------------------------------------------------------------
+  cue.on('settings:changed', async () => {
+    settings = await cue.settingsGet();
+    renderProviderPill();
+  });
+
   (async function boot() {
     settings = await cue.settingsGet();
+    renderProviderPill();
     const platformInfo = await cue.platformInfo();
     publikState = await cue.publikState();
     // A build with no app token never shows the option, and keeps the BYO

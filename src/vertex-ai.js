@@ -24,6 +24,20 @@ const VERTEX_REGIONS = [
   'asia-northeast1'
 ];
 
+// Vertex streaming reliability tuning. The 20s first-chunk deadline matches cue's
+// own inactivity watchdog (STREAM_INACTIVITY_MS in main.js): a call that has not
+// produced a chunk in 20s never starts, so it is retried instead of hung on.
+// The 15s keep-alive exists so the watchdog never fires while a retry round or
+// the non-streaming fallback is still working: empty thoughts rearm it without
+// showing anything (main.js only forwards non-empty thoughts to the UI).
+const FIRST_CHUNK_TIMEOUT_MS = 20000;
+const KEEPALIVE_MS = 15000;
+const TOKEN_TIMEOUT_MS = 15000;
+const LIST_TIMEOUT_MS = 20000;
+const FALLBACK_TIMEOUT_MS = 45000;
+const MAX_FETCH_ATTEMPTS = 3;
+const BACKOFF_BASE_MS = 1000;
+
 const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
 const VERTEX_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 
@@ -120,13 +134,40 @@ function loadAdcCredentials(customPath) {
   return parsed;
 }
 
+// Fetch with an explicit timeout (manual controller: works on every Node fetch).
+// The caller's signal is linked, so a user cancel still aborts immediately.
+async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const outer = options.signal;
+  const onOuterAbort = () => ctrl.abort();
+  if (outer) {
+    if (outer.aborted) ctrl.abort();
+    else outer.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  try {
+    return await fetchImpl(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+    if (outer) outer.removeEventListener('abort', onOuterAbort);
+  }
+}
+
 async function exchangeTokenRequest(tokenUri, bodyParams, fetchImpl = fetch) {
   const body = new URLSearchParams(bodyParams).toString();
-  const response = await fetchImpl(tokenUri, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
+  let response;
+  try {
+    response = await fetchWithTimeout(fetchImpl, tokenUri, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    }, TOKEN_TIMEOUT_MS);
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      throw new Error('Vertex AI OAuth token exchange timed out.');
+    }
+    throw err;
+  }
   let data = null;
   try {
     data = await response.json();
@@ -266,7 +307,15 @@ async function listVertexModels(config = {}, fetchImpl = fetch) {
     : `https://${loc}-aiplatform.googleapis.com`;
   const url = `${host}/v1beta1/publishers/google/models?pageSize=100`;
 
-  const response = await fetchImpl(url, { method: 'GET', headers });
+  let response;
+  try {
+    response = await fetchWithTimeout(fetchImpl, url, { method: 'GET', headers }, LIST_TIMEOUT_MS);
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      throw new Error('Vertex AI model list timed out.');
+    }
+    throw err;
+  }
   if (!response.ok) {
     let errText = '';
     try { errText = await response.text(); } catch (_) {}
@@ -389,7 +438,119 @@ function buildVertexPayload(params = {}, modelId = '') {
   return payload;
 }
 
-async function consumeVertexSseStream(response, onToken, onThought, signal) {
+// ---------------------------------------------------------------------------
+// Streaming reliability: hedged regions, first-chunk deadline, retry, fallback.
+// ---------------------------------------------------------------------------
+//
+// The old code walked regions one at a time (preferred -> global -> us-central1
+// -> europe-west2), retried only 404s, threw immediately on 409/429/5xx, and
+// consumed the SSE stream with a plain for-await loop that ignored the abort
+// signal while no chunk arrived. A stalled region therefore hung the whole call
+// until cue's 20s watchdog killed it, and a 409 (serving-side conflict, seen in
+// the console 2026-10-24 21:27-21:30 AZT) killed the request with no retry.
+//
+// The new flow, per call:
+//   1. Hedge: all candidate regions fire in parallel. The first region to yield
+//      any chunk (thought or token) wins; losers are aborted at once.
+//   2. Deadline: if no region yields a chunk within 20s, the hedge is aborted
+//      and run once more (one retry round).
+//   3. Fallback: if streaming still produced nothing, a single-shot
+//      :generateContent request runs hedged across regions with a 45s deadline.
+//      Its text is forwarded as one token. If it also fails, the original
+//      streaming error is rethrown, so the user sees the real failure.
+//   4. Keep-alive: until the first real chunk, an empty thought is emitted
+//      every 15s. That rearms cue's 20s watchdog without displaying anything.
+// Once any chunk has been shown, the stream runs to completion (or errors)
+// without fallback: falling back then would duplicate output.
+// ---------------------------------------------------------------------------
+
+function isRetryableStatus(status) {
+  return status === 429 || status === 409 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+// Abort-aware sleep: resolves early when the signal fires, so a hedged loser
+// stuck in backoff settles immediately instead of delaying the winner.
+function sleep(ms, signal) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+// Fetch that retries fast, retryable failures (429/409/5xx) with exponential
+// backoff + jitter. Aborts and network errors propagate immediately: the hedge
+// across regions already covers a single region's transient failure, and an
+// abort must never be mistaken for a retryable error.
+async function fetchWithRetry(fetchImpl, url, options = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      const backoff = BACKOFF_BASE_MS * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
+      await sleep(backoff, options.signal);
+    }
+    if (options.signal && options.signal.aborted) {
+      const abortErr = new Error('The operation was aborted.');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    let response;
+    try {
+      response = await fetchImpl(url, options);
+    } catch (err) {
+      throw err;
+    }
+    if (response.ok) return response;
+    if (!isRetryableStatus(response.status) || attempt === MAX_FETCH_ATTEMPTS - 1) {
+      let errBody = '';
+      try { errBody = await response.text(); } catch (_) {}
+      const err = new Error(`Vertex AI error (${response.status}): ${errBody.slice(0, 300)}`);
+      err.status = response.status;
+      throw err;
+    }
+    lastError = response;
+  }
+  throw lastError || new Error('Vertex AI request failed.');
+}
+
+// Race a stream read against the abort signal. A plain for-await loop only
+// notices the signal when the next chunk arrives, so a stalled stream hangs
+// forever despite the abort; this resolves as done the moment it fires.
+function readWithSignal(reader, signal) {
+  if (!signal) return reader.read();
+  if (signal.aborted) return Promise.resolve({ done: true, value: undefined });
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      try { reader.cancel(); } catch (_) {}
+      resolve({ done: true, value: undefined });
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    reader.read().then(
+      (res) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(res);
+      },
+      () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve({ done: true, value: undefined });
+      }
+    );
+  });
+}
+
+// Consume one SSE response. onChunk(kind, text) fires for 'thought' and
+// 'token' chunks in arrival order; usageMetadata is captured when present.
+// Prefers getReader (abort-aware); falls back to async-iterator bodies and
+// finally to a buffered text() read for non-streaming mocks.
+async function consumeVertexSseStream(response, { onChunk, signal } = {}) {
   let fullText = '';
   let usage = null;
 
@@ -413,20 +574,34 @@ async function consumeVertexSseStream(response, onToken, onThought, signal) {
       const parts = (candidate.content && candidate.content.parts) || [];
       for (const part of parts) {
         if (part && part.thought === true) {
-          if (part.text && typeof onThought === 'function') {
-            onThought(part.text);
-          }
+          if (part.text && typeof onChunk === 'function') onChunk('thought', part.text);
           continue;
         }
         if (part && typeof part.text === 'string' && part.text.length > 0) {
           fullText += part.text;
-          if (typeof onToken === 'function') onToken(part.text);
+          if (typeof onChunk === 'function') onChunk('token', part.text);
         }
       }
     }
   };
 
-  if (response.body && typeof response.body[Symbol.asyncIterator] === 'function') {
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { done, value } = await readWithSignal(reader, signal);
+      if (done) break;
+      buffer += typeof value === 'string' ? value : decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        processLine(line);
+      }
+      if (signal && signal.aborted) break;
+    }
+    if (buffer.trim()) processLine(buffer);
+  } else if (response.body && typeof response.body[Symbol.asyncIterator] === 'function') {
     const decoder = new TextDecoder();
     let buffer = '';
     for await (const chunk of response.body) {
@@ -448,6 +623,198 @@ async function consumeVertexSseStream(response, onToken, onThought, signal) {
   }
 
   return { fullText, usage };
+}
+
+// One streaming attempt against a single region. Returns the completed result;
+// throws on any failure before or during the stream.
+async function attemptStreamRegion({ url, headers, body, signal, onChunk, fetchImpl }) {
+  const response = await fetchWithRetry(fetchImpl, url, {
+    method: 'POST',
+    headers,
+    body,
+    signal
+  });
+  return consumeVertexSseStream(response, { onChunk, signal });
+}
+
+// Fire all candidate regions in parallel. The first region to yield any chunk
+// wins and its chunks are forwarded; losers are aborted at once. Returns the
+// winner's completed result. If the winner fails mid-stream (after chunks were
+// shown), its error is thrown: the partial output stays, and falling back
+// would duplicate it. If no region ever yields a chunk, the last failure wins.
+async function hedgedStream({ locations, projectId, model, payload, headers, signal, onChunk, onFirstChunk, fetchImpl }) {
+  let winner = null;
+  const controllers = new Map();
+
+  const abortLosers = (winLoc) => {
+    for (const [loc, ctrl] of controllers) {
+      if (loc !== winLoc) {
+        try { ctrl.abort(); } catch (_) {}
+      }
+    }
+  };
+
+  const onOuterAbort = () => {
+    for (const ctrl of controllers.values()) {
+      try { ctrl.abort(); } catch (_) {}
+    }
+  };
+  if (signal) {
+    if (signal.aborted) onOuterAbort();
+    else signal.addEventListener('abort', onOuterAbort, { once: true });
+  }
+
+  try {
+    const attempts = locations.map(async (location) => {
+      const ctrl = new AbortController();
+      controllers.set(location, ctrl);
+      if (signal && signal.aborted) ctrl.abort();
+      const url = buildVertexEndpointUrl({
+        projectId,
+        location,
+        model,
+        action: 'streamGenerateContent',
+        sse: true
+      });
+      try {
+        const { fullText, usage } = await attemptStreamRegion({
+          url,
+          headers,
+          body: JSON.stringify(payload),
+          signal: ctrl.signal,
+          fetchImpl,
+          onChunk: (kind, text) => {
+            if (winner === null) {
+              winner = location;
+              abortLosers(location);
+              if (typeof onFirstChunk === 'function') onFirstChunk();
+            }
+            if (winner === location && typeof onChunk === 'function') onChunk(kind, text);
+          }
+        });
+        // An aborted attempt is a failure, not an empty success: without this,
+        // a user cancel would surface as a completed empty result.
+        if (ctrl.signal.aborted) {
+          const abortErr = new Error('The operation was aborted.');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        return { ok: true, location, fullText, usage };
+      } catch (err) {
+        return { ok: false, location, error: err };
+      }
+    });
+
+    const results = await Promise.all(attempts);
+    if (winner !== null) {
+      const win = results.find((r) => r.location === winner);
+      if (win && win.ok) return win;
+      if (win) throw win.error;
+    }
+    const lastFailure = results[results.length - 1] || results[0];
+    throw (lastFailure && lastFailure.error) || new Error('Vertex AI streaming failed in all regions.');
+  } finally {
+    if (signal) signal.removeEventListener('abort', onOuterAbort);
+  }
+}
+
+// A hedge with a first-chunk deadline. On timeout the error carries
+// code 'FIRST_CHUNK_TIMEOUT' so the caller can retry; a caller abort is
+// rethrown as-is and always wins over the timeout.
+async function runHedgeWithDeadline(args, timeoutMs) {
+  const ctrl = new AbortController();
+  const outer = args.signal;
+  const onOuterAbort = () => ctrl.abort();
+  if (outer) {
+    if (outer.aborted) ctrl.abort();
+    else outer.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, timeoutMs);
+  try {
+    return await hedgedStream({
+      ...args,
+      signal: ctrl.signal,
+      onFirstChunk: () => clearTimeout(timer)
+    });
+  } catch (err) {
+    if (outer && outer.aborted) throw err;
+    if (timedOut) {
+      const timeoutErr = new Error(`Vertex AI streaming timed out before the first chunk (${timeoutMs}ms).`);
+      timeoutErr.code = 'FIRST_CHUNK_TIMEOUT';
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (outer) outer.removeEventListener('abort', onOuterAbort);
+  }
+}
+
+// Single-shot :generateContent across all regions in parallel; the first
+// complete 200 wins. Thought parts are stripped; only answer text is kept.
+async function generateVertexContent({ locations, projectId, model, payload, headers, signal, fetchImpl }) {
+  const controllers = new Map();
+  const onOuterAbort = () => {
+    for (const ctrl of controllers.values()) {
+      try { ctrl.abort(); } catch (_) {}
+    }
+  };
+  if (signal) {
+    if (signal.aborted) onOuterAbort();
+    else signal.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  try {
+    const attempts = locations.map(async (location) => {
+      const ctrl = new AbortController();
+      controllers.set(location, ctrl);
+      if (signal && signal.aborted) ctrl.abort();
+      const url = buildVertexEndpointUrl({
+        projectId,
+        location,
+        model,
+        action: 'generateContent',
+        sse: false
+      });
+      try {
+        const response = await fetchWithRetry(fetchImpl, url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+          signal: ctrl.signal
+        });
+        const data = await response.json();
+        const candidates = data.candidates || [];
+        let fullText = '';
+        for (const candidate of candidates) {
+          const parts = (candidate.content && candidate.content.parts) || [];
+          for (const part of parts) {
+            if (part && part.thought === true) continue;
+            if (part && typeof part.text === 'string') fullText += part.text;
+          }
+        }
+        // A winner ends the race: abort the rest at once.
+        for (const [loc, c] of controllers) {
+          if (loc !== location) {
+            try { c.abort(); } catch (_) {}
+          }
+        }
+        return { ok: true, location, fullText, usage: data.usageMetadata || null };
+      } catch (err) {
+        return { ok: false, location, error: err };
+      }
+    });
+    const results = await Promise.all(attempts);
+    const win = results.find((r) => r.ok);
+    if (win) return { fullText: win.fullText, usage: win.usage, region: win.location, model };
+    const lastFailure = results[results.length - 1] || results[0];
+    throw (lastFailure && lastFailure.error) || new Error('Vertex AI request failed in all regions.');
+  } finally {
+    if (signal) signal.removeEventListener('abort', onOuterAbort);
+  }
 }
 
 async function streamVertexGenerateContent(config = {}, params = {}, fetchImpl = fetch) {
@@ -475,57 +842,118 @@ async function streamVertexGenerateContent(config = {}, params = {}, fetchImpl =
     model
   );
 
-  let lastError = null;
-  for (let i = 0; i < candidateLocations.length; i++) {
-    const location = candidateLocations[i];
-    const url = buildVertexEndpointUrl({
-      projectId,
-      location,
-      model,
-      action: 'streamGenerateContent',
-      sse: true
-    });
+  const headers = {
+    Authorization: `Bearer ${auth.token}`,
+    'Content-Type': 'application/json',
+    'x-goog-user-project': projectId
+  };
 
-    const response = await fetchImpl(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${auth.token}`,
-        'Content-Type': 'application/json',
-        'x-goog-user-project': projectId
-      },
-      body: JSON.stringify(payload),
-      signal: params.signal
-    });
-
-    if (response.status === 404 && i < candidateLocations.length - 1) {
-      let errBody = '';
-      try { errBody = await response.text(); } catch (_) {}
-      lastError = Object.assign(
-        new Error(`Vertex AI model "${model}" not found in ${location} (404): ${errBody.slice(0, 200)}`),
-        { status: 404 }
-      );
-      continue;
+  const signal = params.signal;
+  const onToken = params.onToken;
+  const onThought = params.onThought;
+  let forwardedAny = false;
+  const onChunk = (kind, text) => {
+    forwardedAny = true;
+    if (kind === 'thought') {
+      if (typeof onThought === 'function') onThought(text);
+    } else if (typeof onToken === 'function') {
+      onToken(text);
     }
+  };
 
-    if (!response.ok) {
-      let errBody = '';
-      try { errBody = await response.text(); } catch (_) {}
-      const err = new Error(`Vertex AI error (${response.status} in ${location}): ${errBody.slice(0, 300)}`);
-      err.status = response.status;
-      throw err;
+  // Keep-alive until the first real chunk: an empty thought every 15s rearms
+  // cue's 20s inactivity watchdog while a retry round or the fallback runs.
+  // main.js forwards only non-empty thoughts to the UI, so this shows nothing.
+  let keepAliveTimer = null;
+  const stopKeepAlive = () => {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
     }
+  };
+  const startKeepAlive = () => {
+    if (keepAliveTimer || typeof onThought !== 'function') return;
+    keepAliveTimer = setInterval(() => {
+      if (!forwardedAny && !(signal && signal.aborted)) {
+        try { onThought(''); } catch (_) {}
+      }
+    }, KEEPALIVE_MS);
+  };
 
-    const { fullText, usage } = await consumeVertexSseStream(response, params.onToken, params.onThought, params.signal);
-    return {
-      fullText,
-      usage,
-      region: location,
-      model,
-      authMode: auth.authMode
-    };
+  const baseArgs = {
+    locations: candidateLocations,
+    projectId,
+    model,
+    payload,
+    headers,
+    fetchImpl
+  };
+
+  let streamingError = null;
+  try {
+    startKeepAlive();
+    try {
+      const res = await runHedgeWithDeadline({ ...baseArgs, signal, onChunk }, FIRST_CHUNK_TIMEOUT_MS);
+      stopKeepAlive();
+      return {
+        fullText: res.fullText,
+        usage: res.usage,
+        region: res.location,
+        model,
+        authMode: auth.authMode
+      };
+    } catch (err) {
+      if (signal && signal.aborted) throw err;
+      streamingError = err;
+      // Stalls get one retry round; fast failures (404 everywhere, bad key)
+      // go straight to the fallback instead of burning another 20s.
+      if (err && err.code === 'FIRST_CHUNK_TIMEOUT') {
+        try {
+          const res = await runHedgeWithDeadline({ ...baseArgs, signal, onChunk }, FIRST_CHUNK_TIMEOUT_MS);
+          stopKeepAlive();
+          return {
+            fullText: res.fullText,
+            usage: res.usage,
+            region: res.location,
+            model,
+            authMode: auth.authMode
+          };
+        } catch (err2) {
+          if (signal && signal.aborted) throw err2;
+          streamingError = err2;
+        }
+      }
+      // Anything already shown must never be duplicated by a fallback answer.
+      if (forwardedAny) throw streamingError;
+      // Non-streaming fallback, 45s deadline, hedged across regions.
+      const fbCtrl = new AbortController();
+      const fbTimer = setTimeout(() => fbCtrl.abort(), FALLBACK_TIMEOUT_MS);
+      const onOuterAbort = () => fbCtrl.abort();
+      if (signal) {
+        if (signal.aborted) fbCtrl.abort();
+        else signal.addEventListener('abort', onOuterAbort, { once: true });
+      }
+      try {
+        const fb = await generateVertexContent({ ...baseArgs, signal: fbCtrl.signal });
+        stopKeepAlive();
+        if (fb.fullText && typeof onToken === 'function') onToken(fb.fullText);
+        return {
+          fullText: fb.fullText,
+          usage: fb.usage,
+          region: fb.region,
+          model,
+          authMode: auth.authMode
+        };
+      } catch (_) {
+        throw streamingError;
+      } finally {
+        clearTimeout(fbTimer);
+        if (signal) signal.removeEventListener('abort', onOuterAbort);
+      }
+    }
+  } finally {
+    stopKeepAlive();
   }
-
-  throw lastError || new Error(`Vertex AI request failed for model "${model}".`);
 }
 
 module.exports = {
@@ -539,5 +967,6 @@ module.exports = {
   buildVertexEndpointUrl,
   buildVertexPayload,
   listVertexModels,
+  generateVertexContent,
   streamVertexGenerateContent
 };
