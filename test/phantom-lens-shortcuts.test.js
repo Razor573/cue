@@ -162,6 +162,7 @@ test('Unit 2: main.js registers all Phantom Lens global shortcuts and IPC handle
     'CommandOrControl+Shift+Alt+Right',
     'CommandOrControl+Shift+Alt+T',
     'CommandOrControl+Shift+Alt+A',
+    'CommandOrControl+Shift+Alt+S',
     'CommandOrControl+\\\\'
   ];
 

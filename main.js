@@ -1612,7 +1612,9 @@ const APP_SHORTCUT_KEYS = [
   'CommandOrControl+Shift+Alt+Left',
   'CommandOrControl+Shift+Alt+Right',
   'CommandOrControl+Shift+Alt+T',
-  'CommandOrControl+Shift+Alt+A'
+  'CommandOrControl+Shift+Alt+A',
+  'CommandOrControl+Shift+Alt+S',
+  'CommandOrControl+Alt+Shift+S'
 ];
 
 function registerVisibilityShortcuts() {
@@ -1669,6 +1671,15 @@ function cycleThinkingLevel() {
   store.setSettings({ [key]: next });
   send('settings:changed', { [key]: next });
   send('status', { message: `Thinking: ${next.charAt(0)}${next.slice(1).toLowerCase()}` });
+}
+
+function toggleSmart() {
+  const settings = store.getSettings();
+  const next = !settings.smart;
+  const updated = store.setSettings({ smart: next });
+  const model = currentProviderModel(updated);
+  send('settings:changed', { smart: next });
+  send('status', { message: `Smart mode: ${next ? 'On' : 'Off'}${model ? ` · ${model}` : ''}` });
 }
 
 function toggleAutoAnswer() {
@@ -1882,9 +1893,17 @@ function registerAppShortcuts() {
     if (!isOverlayVisible()) return;
     cycleThinkingLevel();
   });
-  globalShortcut.register('CommandOrControl+Shift+Alt+A', () => {
+    globalShortcut.register('CommandOrControl+Shift+Alt+A', () => {
     if (!isOverlayVisible()) return;
     toggleAutoAnswer();
+  });
+  globalShortcut.register('CommandOrControl+Shift+Alt+S', () => {
+    if (!isOverlayVisible()) return;
+    toggleSmart();
+  });
+  globalShortcut.register('CommandOrControl+Alt+Shift+S', () => {
+    if (!isOverlayVisible()) return;
+    toggleSmart();
   });
 
     for (const [name, wasRegistered] of Object.entries(shortcutState)) {

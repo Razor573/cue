@@ -3322,6 +3322,8 @@
   // ---- boot --------------------------------------------------------------
   cue.on('settings:changed', async () => {
     settings = await cue.settingsGet();
+    if (smartBtn) smartBtn.classList.toggle('on', !!(settings && settings.smart));
+    updateSmartTooltip();
     if (autoController) {
       autoController.setConfig({ enabled: !!(settings && settings.autoAnswer), capturing: capturingActive });
     }
