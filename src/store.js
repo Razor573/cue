@@ -28,6 +28,7 @@ const DEFAULTS = {
     threads: 0
   },
   smart: false,
+  autoAnswer: false,
   // Meeting (system) audio. macOS has no way to capture system audio except through
   // a ScreenCaptureKit display-capture session, and the OS then shows its
   // screen-recording indicator in the menu bar and lists cue under Control Center's

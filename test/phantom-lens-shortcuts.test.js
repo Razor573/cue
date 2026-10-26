@@ -96,7 +96,8 @@ test('Unit 1: Preload bridge exposes methods and allows channels', () => {
     'toggleInteractiveMode',
     'attachFiles',
     'removeLastAttachedFile',
-    'checkUpdate'
+    'checkUpdate',
+    'abort'
   ];
   for (const method of requiredMethods) {
     assert.ok(
@@ -160,6 +161,7 @@ test('Unit 2: main.js registers all Phantom Lens global shortcuts and IPC handle
     'CommandOrControl+Shift+Alt+Left',
     'CommandOrControl+Shift+Alt+Right',
     'CommandOrControl+Shift+Alt+T',
+    'CommandOrControl+Shift+Alt+A',
     'CommandOrControl+\\\\'
   ];
 
@@ -179,7 +181,8 @@ test('Unit 2: main.js registers all Phantom Lens global shortcuts and IPC handle
     'stealth:stop',
     'files:attach-dialog',
     'files:remove-last',
-    'app:update-check'
+    'app:update-check',
+    'llm:abort'
   ];
   for (const ipc of requiredIpc) {
     assert.ok(

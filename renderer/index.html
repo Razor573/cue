@@ -83,6 +83,8 @@
             </div>
             <div id="composer-bottom">
               <button id="smart-toggle" class="smart-pill"><span class="ic"></span><span>Smart</span></button>
+              <button id="auto-answer-toggle" class="smart-pill auto-pill" title="Auto-answer spoken questions when they finish (Ctrl+Shift+Alt+A)"><span class="ic"></span><span id="auto-answer-label">Auto</span></button>
+              <button id="cancel-answer-btn" class="cancel-pill hidden" title="Stop answer immediately (Esc / Ctrl+R)">✕ Stop</button>
               <button id="history-btn" class="history-btn" title="Show everything said this session"><span class="ic"></span><span>Transcription history</span></button>
               <button id="more-btn" class="more-btn" title="Settings"></button>
               <div class="spacer"></div>
@@ -372,6 +374,13 @@
         </div>
         <div class="s-note" id="meeting-audio-note"></div>
 
+        <label class="s-label">Autonomous answering <span class="s-hint">answers spoken questions automatically when they finish</span></label>
+        <div class="s-seg" id="auto-answer-seg">
+          <button data-auto-answer="off">Off</button>
+          <button data-auto-answer="on">On</button>
+        </div>
+        <div class="s-note" id="auto-answer-note">Waits for a complete question and a natural pause on the other side of the call before answering. Ignores greetings, audio checks, and your own voice.</div>
+
         <div class="whisper-card">
           <div class="whisper-runtime-row">
             <span class="s-label">whisper.cpp runtime</span>
@@ -463,6 +472,10 @@
             <div class="hotkey-row">
               <span class="hotkey-desc">Reset view, cancel generation &amp; queues</span>
               <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">R</span></span>
+            </div>
+            <div class="hotkey-row">
+              <span class="hotkey-desc">Toggle autonomous question answering</span>
+              <span class="hotkey-keys"><span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">Alt</span><span class="keycap">A</span></span>
             </div>
           </div>
 
@@ -576,6 +589,7 @@
   </div>
 
   <script src="icons.js"></script>
+  <script src="../src/auto-answer.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

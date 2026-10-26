@@ -847,6 +847,17 @@ async function setCapturing(active) {
 // -------- feature runner --------
 let activeFeatureAbort = null;
 
+function abortActiveFeature() {
+  if (activeFeatureAbort) {
+    activeFeatureAbort.abort();
+    activeFeatureAbort = null;
+  }
+  if (state.busy) {
+    state.busy = false;
+    send('llm:done', { aborted: true });
+  }
+}
+
 async function runFeature(mode, userText) {
   if (state.busy) {
     if (activeFeatureAbort) {
@@ -1330,6 +1341,7 @@ ipcMain.handle('slides:clear', () => {
   return { ok: true };
 });
 ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text));
+ipcMain.on('llm:abort', () => abortActiveFeature());
 ipcMain.on('mic:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('you', arrayBuffer); });
 ipcMain.on('system:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('them', arrayBuffer); });
 ipcMain.handle('mouse:click-through-enable', () => {
@@ -1599,7 +1611,8 @@ const APP_SHORTCUT_KEYS = [
   'CommandOrControl+Shift+/',
   'CommandOrControl+Shift+Alt+Left',
   'CommandOrControl+Shift+Alt+Right',
-  'CommandOrControl+Shift+Alt+T'
+  'CommandOrControl+Shift+Alt+T',
+  'CommandOrControl+Shift+Alt+A'
 ];
 
 function registerVisibilityShortcuts() {
@@ -1656,6 +1669,15 @@ function cycleThinkingLevel() {
   store.setSettings({ [key]: next });
   send('settings:changed', { [key]: next });
   send('status', { message: `Thinking: ${next.charAt(0)}${next.slice(1).toLowerCase()}` });
+}
+
+function toggleAutoAnswer() {
+  const settings = store.getSettings();
+  const next = !settings.autoAnswer;
+  store.setSettings({ autoAnswer: next });
+  send('settings:changed', { autoAnswer: next });
+  send('status', { message: `Auto-answer: ${next ? 'On' : 'Off'}` });
+
 }
 
 function registerAppShortcuts() {
@@ -1723,6 +1745,7 @@ function registerAppShortcuts() {
   globalShortcut.register('CommandOrControl+R', () => {
     if (!isOverlayVisible()) return;
     state.busy = false;
+    abortActiveFeature();
     sessionDirectives.length = 0;
     send('reset-view', {});
     send('status', { message: 'Reset and cancelled.' });
@@ -1858,6 +1881,10 @@ function registerAppShortcuts() {
   globalShortcut.register('CommandOrControl+Shift+Alt+T', () => {
     if (!isOverlayVisible()) return;
     cycleThinkingLevel();
+  });
+  globalShortcut.register('CommandOrControl+Shift+Alt+A', () => {
+    if (!isOverlayVisible()) return;
+    toggleAutoAnswer();
   });
 
     for (const [name, wasRegistered] of Object.entries(shortcutState)) {

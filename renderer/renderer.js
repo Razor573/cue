@@ -220,6 +220,8 @@
   document.querySelector('.act[data-mode="say"] .ic').innerHTML = icon('wand-sparkles', { size: 16 });
   document.querySelector('.act[data-mode="recap"] .ic').innerHTML = icon('refresh-cw', { size: 16 });
   $('#smart-toggle .ic').innerHTML = icon('zap', { size: 14 });
+  const autoAnswerIc = document.querySelector('#auto-answer-toggle .ic');
+  if (autoAnswerIc) autoAnswerIc.innerHTML = icon('sparkles', { size: 14 });
   $('#more-btn').innerHTML = icon('more-horizontal', { size: 18 });
   $('#send-btn').innerHTML = icon('play', { size: 15 });
   const clearIC = document.querySelector('#clear-transcript-btn .ic');
@@ -645,7 +647,9 @@
         composer.classList.add('stt-ready');
         updateSendButtonState(); // FIX #9: Update send button when ready
         // Subtle notification that question is ready
-        showToast('Press Enter to answer', 2500);
+        if (!settings || !settings.autoAnswer) {
+          showToast('Press Enter to answer', 2500);
+        }
       }
     }, 1800);
 
@@ -850,6 +854,110 @@
     await cue.settingsSet({ smart: settings.smart });
   });
 
+  const autoAnswerBtn = $('#auto-answer-toggle');
+  const autoAnswerLabel = $('#auto-answer-label');
+  const cancelAnswerBtn = $('#cancel-answer-btn');
+  let capturingActive = false;
+
+  const autoController = window.CueAutoAnswer && window.CueAutoAnswer.createAutoAnswerController
+    ? window.CueAutoAnswer.createAutoAnswerController({
+        onStateChange() {
+          renderAutoAnswerUi();
+        },
+        onTriggerAnswer(questionText, { isContinuation } = {}) {
+          if (isContinuation && cue && cue.abort) {
+            cue.abort();
+          }
+          saveToQuestionHistory(questionText);
+          hardClearSTTFill(false);
+          runMode('answerThis', questionText);
+        },
+        onAbortAnswer() {
+          if (cue && cue.abort) {
+            cue.abort();
+          }
+          finalizeCurrentResponse(true);
+          setBusy(false);
+        }
+      })
+    : null;
+
+  function renderAutoAnswerUi() {
+    const enabled = !!(settings && settings.autoAnswer);
+    const st = autoController ? autoController.getState().state : 'off';
+
+    if (autoAnswerBtn) {
+      autoAnswerBtn.classList.toggle('on', enabled);
+      autoAnswerBtn.classList.toggle('listening', enabled && (st === 'listening' || st === 'settling'));
+      autoAnswerBtn.classList.toggle('settling', enabled && st === 'settling');
+      autoAnswerBtn.classList.toggle('thinking', enabled && st === 'thinking');
+    }
+
+    if (autoAnswerLabel) {
+      if (!enabled) {
+        autoAnswerLabel.textContent = 'Auto';
+      } else if (!capturingActive) {
+        autoAnswerLabel.textContent = 'Auto · On';
+      } else if (st === 'listening' || st === 'settling') {
+        autoAnswerLabel.textContent = 'Auto · Listening';
+      } else if (st === 'thinking') {
+        autoAnswerLabel.textContent = 'Auto · Thinking';
+      } else {
+        autoAnswerLabel.textContent = 'Auto · Quiet';
+      }
+    }
+
+    if (cancelAnswerBtn) {
+      const showCancel = busy || (enabled && (st === 'thinking' || st === 'settling'));
+      cancelAnswerBtn.classList.toggle('hidden', !showCancel);
+    }
+
+    const sttStatusEl = document.getElementById('stt-status');
+    if (sttStatusEl) {
+      if (enabled && capturingActive && sttState !== 'error') {
+        if (st === 'thinking') {
+          sttStatusEl.textContent = 'Auto · Answering…';
+        } else if (st === 'listening' || st === 'settling') {
+          sttStatusEl.textContent = 'Auto · Listening…';
+        } else {
+          sttStatusEl.textContent = 'Auto · Quiet';
+        }
+      } else {
+        sttStatusEl.textContent = STT_LABELS[sttState];
+      }
+    }
+
+    document.querySelectorAll('#auto-answer-seg button').forEach((button) => {
+      button.classList.toggle('on', (button.dataset.autoAnswer === 'on') === enabled);
+    });
+  }
+
+  function cancelActiveAnswer() {
+    if (autoController) autoController.cancel();
+    if (cue && cue.abort) cue.abort();
+    finalizeCurrentResponse(true);
+    setBusy(false);
+    renderAutoAnswerUi();
+  }
+
+  if (autoAnswerBtn) {
+    autoAnswerBtn.addEventListener('click', async () => {
+      if (!settings) return;
+      settings.autoAnswer = !settings.autoAnswer;
+      if (autoController) {
+        autoController.setConfig({ enabled: !!settings.autoAnswer, capturing: capturingActive });
+      }
+      renderAutoAnswerUi();
+      await cue.settingsSet({ autoAnswer: settings.autoAnswer });
+    });
+  }
+
+  if (cancelAnswerBtn) {
+    cancelAnswerBtn.addEventListener('click', () => {
+      cancelActiveAnswer();
+    });
+  }
+
   // Hide / collapse
   let reopenSidebarOnExpand = false;
   function toggleHide() {
@@ -951,6 +1059,7 @@
       clearTranscriptSidebar();
       // Only a question auto-filled from the transcript goes; anything the user typed stays.
       if (inputFromSTT) hardClearSTTFill();
+      if (autoController) autoController.cancel();
       showToast('Transcript cleared.', 2500);
     });
   }
@@ -1178,6 +1287,7 @@
     if (!label) return;
     label.textContent = STT_LABELS[state];
     label.className = 'stt-status stt-' + state;
+    renderAutoAnswerUi();
   }
 
   function updateSttStatus({ active, streaming } = {}) {
@@ -1384,6 +1494,11 @@
     }
     if (active && mode === 'local') setSttState('local');
     else updateSttStatus({ active, streaming });
+    capturingActive = !!active;
+    if (autoController) {
+      autoController.setConfig({ enabled: !!(settings && settings.autoAnswer), capturing: capturingActive });
+    }
+    renderAutoAnswerUi();
   });
 
   // ---- real-time transcript display (interim + final) ----
@@ -1439,6 +1554,9 @@
     if (channel === 'them' && !input.value.trim()) {
       showInterimInInput(text);
     }
+    if (channel === 'them' && autoController) {
+      autoController.onThemInterim(text);
+    }
   });
   cue.on('stt:final', ({ channel, text }) => {
     setLiveDotState('idle');
@@ -1476,6 +1594,7 @@
   });
   cue.on('vad:state', ({ channel, speaking }) => {
     setLiveDotState(speaking ? 'speaking' : 'idle');
+    if (autoController) autoController.onVadState(channel, speaking);
   });
   cue.on('slides:update', ({ count, last }) => {
     if (!count) return;
@@ -1483,6 +1602,8 @@
     showToast(`Slide ${count} captured · ${title}`, 3000);
   });
   cue.on('llm:start', ({ userBubble, small, category, mode, userText }) => {
+    if (autoController) autoController.onLlmStart();
+    renderAutoAnswerUi();
     finalizeCurrentResponse(true);
     streamedText = '';
     accumulatedThinking = '';
@@ -1572,10 +1693,15 @@
       bodyEl.scrollTop = bodyEl.scrollHeight;
     }
   });
-  cue.on('llm:token', ({ text }) => appendToken(text));
+  cue.on('llm:token', ({ text }) => {
+    if (autoController) autoController.onLlmToken();
+    appendToken(text);
+  });
   cue.on('llm:done', ({ aborted } = {}) => {
     finalizeCurrentResponse(false);
     setBusy(false);
+    if (autoController) autoController.onLlmDone();
+    renderAutoAnswerUi();
     if (!aborted && (streamedText || accumulatedThinking)) {
       responseHistory.push({
         id: Date.now(),
@@ -1597,6 +1723,8 @@
     finalizeCurrentResponse(false);
     if (!aiEl) startAi(true);
     aiEl.dataset.raw = message; finalizeAi(); setBusy(false);
+    if (autoController) autoController.onLlmDone();
+    renderAutoAnswerUi();
     // publik errors carry one action: the renderer's markdown emits no anchors,
     // so a link needs a real button (same pattern as the mic banner).
     if (action && action.kind === 'card') { showPublikCard(); return; }
@@ -1622,15 +1750,18 @@
     if (channel === 'them') {
       cancelSoftClear(); // Interviewer is speaking, cancel any pending clear
       autoFillInputFromSTT(text);
+      if (autoController && (inputFromSTT || !input.value.trim())) autoController.onThemFinal(text);
     } else {
       // User spoke — soft clear (don't immediately wipe, wait to see if they're really answering)
       softClearSTTFill();
+      if (autoController) autoController.onYouFinal(text);
     }
   });
   // Transcript of a meeting resumed at launch: sidebar rows only — no
   // auto-fill of the input box, which is for live speech.
   cue.on('transcript:restore', ({ turns }) => {
     if (!turns || turns.length === 0) {
+      if (autoController) autoController.cancel();
       const turnsEl = document.getElementById('live-transcript-turns');
       if (turnsEl) turnsEl.innerHTML = '';
       const listEl = document.getElementById('ts-list');
@@ -2317,6 +2448,9 @@
     document.querySelectorAll('#meeting-audio-seg button').forEach((button) => {
       button.classList.toggle('on', (button.dataset.meetingAudio === 'on') === !!settings.meetingAudio);
     });
+    document.querySelectorAll('#auto-answer-seg button').forEach((button) => {
+      button.classList.toggle('on', (button.dataset.autoAnswer === 'on') === !!settings.autoAnswer);
+    });
     const meetingAudioNote = $('#meeting-audio-note');
     if (meetingAudioNote) {
       meetingAudioNote.textContent = isMac
@@ -2409,6 +2543,13 @@
   document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.addEventListener('click', () => {
     settings.minimaxRegion = b.dataset.region;
     document.querySelectorAll('#minimax-region-seg button').forEach((x) => x.classList.toggle('on', x === b));
+  }));
+  document.querySelectorAll('#auto-answer-seg button').forEach((button) => button.addEventListener('click', () => {
+    settings.autoAnswer = button.dataset.autoAnswer === 'on';
+    if (autoController) {
+      autoController.setConfig({ enabled: !!settings.autoAnswer, capturing: capturingActive });
+    }
+    renderAutoAnswerUi();
   }));
   document.querySelectorAll('#meeting-audio-seg button').forEach((button) => button.addEventListener('click', () => {
     settings.meetingAudio = button.dataset.meetingAudio === 'on';
@@ -2718,6 +2859,11 @@
   // ---- global keys -------------------------------------------------------
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !scrim.classList.contains('hidden')) void closeSettings();
+    else if (e.key === 'Escape' && !pendingConsentId && (busy || (autoController && (autoController.getState().state === 'thinking' || autoController.getState().state === 'settling')))) {
+      e.preventDefault();
+      cancelActiveAnswer();
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
       if (!scrim.classList.contains('hidden')) {
@@ -3063,6 +3209,8 @@
   });
 
   cue.on('reset-view', () => {
+    if (autoController) autoController.cancel();
+    renderAutoAnswerUi();
     clearMessages();
     streamedText = '';
     accumulatedThinking = '';
@@ -3174,6 +3322,10 @@
   // ---- boot --------------------------------------------------------------
   cue.on('settings:changed', async () => {
     settings = await cue.settingsGet();
+    if (autoController) {
+      autoController.setConfig({ enabled: !!(settings && settings.autoAnswer), capturing: capturingActive });
+    }
+    renderAutoAnswerUi();
     renderProviderPill();
   });
 
@@ -3229,6 +3381,11 @@
     const st = await cue.captureState();
     $('#live-dot').classList.toggle('off', !st.active);
     setSessionButton(st.active);
+    capturingActive = !!st.active;
+    if (autoController) {
+      autoController.setConfig({ enabled: !!(settings && settings.autoAnswer), capturing: capturingActive });
+    }
+    renderAutoAnswerUi();
     if (!settings.onboarded) showOnboard();
   })();
 })();

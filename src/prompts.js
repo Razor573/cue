@@ -221,8 +221,9 @@ const MODES = {
       ), aiRules, 'answerThis');
     },
     build(ctx) {
-      // Only pass the specific question — not the full transcript history
-      return 'Answer this specific interview question:\n\n"' + (ctx.userText || '(no question provided)') + '"\n\nGive the full answer the candidate should say out loud.';
+      const t = formatTranscript(ctx && ctx.transcript ? ctx.transcript : [], 8);
+      return (t ? 'Recent conversation context:\n' + t + '\n\n' : '') +
+        'Answer this specific interview question:\n\n"' + (ctx.userText || '(no question provided)') + '"\n\nGive the full answer the candidate should say out loud.';
     }
   },
 

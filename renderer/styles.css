@@ -531,6 +531,41 @@ button:focus { outline: none; }
 }
 .smart-pill.on .ic { color: #9dc0ff; }
 
+.auto-pill.on {
+  border-color: rgba(52, 211, 153, 0.48);
+  color: #6ee7b7;
+  background: rgba(52, 211, 153, 0.14);
+  box-shadow: 0 0 12px rgba(52, 211, 153, 0.16);
+}
+.auto-pill.on .ic { color: #6ee7b7; }
+.auto-pill.listening, .auto-pill.settling {
+  border-color: rgba(251, 191, 36, 0.55);
+  color: #fde68a;
+  background: rgba(251, 191, 36, 0.14);
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.18);
+}
+.auto-pill.listening .ic, .auto-pill.settling .ic { color: #fde68a; }
+.auto-pill.thinking {
+  border-color: rgba(91, 138, 245, 0.65);
+  color: #bfdbfe;
+  background: rgba(91, 138, 245, 0.22);
+  box-shadow: 0 0 14px rgba(91, 138, 245, 0.28);
+}
+.auto-pill.thinking .ic { color: #bfdbfe; }
+
+.cancel-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 10px; border-radius: var(--r-pill);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5; font-size: 12px; font-weight: 600; font-family: var(--font);
+  cursor: pointer; white-space: nowrap;
+  transition: background 150ms var(--ease-spring), border-color 150ms var(--ease-spring), color 150ms var(--ease-spring), transform 150ms var(--ease-spring);
+}
+.cancel-pill:hover { background: rgba(248, 113, 113, 0.24); color: #fff; border-color: rgba(248, 113, 113, 0.65); }
+.cancel-pill:active { transform: scale(0.96); transition-duration: 80ms; }
+.cancel-pill.hidden { display: none; }
+
 /* History button */
 .history-btn {
   gap: 6px; padding: 5px 11px; border-radius: var(--r-pill);
