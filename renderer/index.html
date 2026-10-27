@@ -57,6 +57,20 @@
           </div>
           <div id="messages"></div>
 
+          <!-- Suggestion card for autoanswer:offer -->
+          <div id="autoanswer-offer-card" class="autoanswer-offer-card hidden">
+            <div class="offer-card-header">
+              <span class="offer-card-icon">💡</span>
+              <span class="offer-card-title">Auto-Answer Suggestion</span>
+              <button id="offer-card-close" class="offer-card-dismiss" title="Dismiss" aria-label="Dismiss">✕</button>
+            </div>
+            <div id="offer-card-text" class="offer-card-text"></div>
+            <div class="offer-card-actions">
+              <button id="offer-card-answer" class="offer-btn-primary">Answer</button>
+              <button id="offer-card-dismiss" class="offer-btn-ghost">Dismiss</button>
+            </div>
+          </div>
+
           <div id="action-row">
             <button class="act act-primary" data-mode="say"
               title="Suggests what to say next based on the conversation">
@@ -77,6 +91,11 @@
               <span>Stealth typing active · Keys swallowed from OS</span>
             </div>
             <div id="attached-files-bar" class="attached-files-bar hidden"></div>
+            <div id="companion-chip-bar" class="companion-chip-bar hidden">
+              <span class="companion-chip-icon">🌐</span>
+              <span class="companion-chip-text" id="companion-chip-title">Captured: Web Page</span>
+              <button id="companion-chip-dismiss" class="companion-chip-dismiss" title="Dismiss context">✕</button>
+            </div>
             <div id="input-area">
               <div id="placeholder">Ask about your screen or conversation, or <span class="keycap">⌘</span><span class="keycap">⇧</span><span class="keycap">⏎</span> for Smart assist</div>
               <textarea id="input" rows="1" spellcheck="false"></textarea>
@@ -142,6 +161,7 @@
         <button class="s-tab" data-tab="transcription">Sound</button>
         <button class="s-tab" data-tab="style">Style</button>
         <button class="s-tab" data-tab="hotkeys">Hotkeys</button>
+        <button class="s-tab" data-tab="companion">Companion</button>
       </div>
 
       <!-- Tab: Keys -->
@@ -374,6 +394,69 @@
         <label class="s-label" for="profile-jd">Target Job Description <span class="s-hint">tailors responses to the role</span></label>
         <textarea id="profile-jd" rows="4" spellcheck="false" placeholder="Paste the job description or key role requirements…"></textarea>
 
+        <!-- Company Dossier section -->
+        <div id="company-dossier-wrap" class="company-dossier-wrap">
+          <div class="dossier-action-bar">
+            <button id="dossier-research-btn" type="button" class="s-action primary">Research Company</button>
+            <button id="dossier-clear-btn" type="button" class="s-action danger hidden">Clear Dossier</button>
+            <span id="dossier-spinner" class="dossier-spinner hidden">Researching company…</span>
+          </div>
+          <div id="dossier-candidates-wrap" class="dossier-candidates-wrap hidden">
+            <span class="s-note">Multiple companies detected. Choose one:</span>
+            <div id="dossier-candidates-list" class="dossier-candidates-list"></div>
+          </div>
+          <div id="dossier-status-msg" class="s-note"></div>
+
+          <!-- Dossier Card -->
+          <div id="dossier-card" class="dossier-card hidden">
+            <div class="dossier-card-head">
+              <div class="dossier-title-row">
+                <span id="dossier-company-name" class="dossier-company-name"></span>
+                <span id="dossier-badge" class="dossier-badge"></span>
+              </div>
+              <div class="dossier-head-actions">
+                <span id="dossier-time" class="dossier-time"></span>
+                <button id="dossier-refresh-btn" type="button" class="btn-ghost btn-xs" title="Refresh dossier">↻ Refresh</button>
+              </div>
+            </div>
+
+            <div class="dossier-card-body">
+              <div class="dossier-section" id="dossier-sec-overview">
+                <div class="dossier-sec-title">Overview</div>
+                <div class="dossier-sec-content" id="dossier-val-overview"></div>
+              </div>
+              <div class="dossier-section" id="dossier-sec-whatTheyDo">
+                <div class="dossier-sec-title">What They Do</div>
+                <div class="dossier-sec-content" id="dossier-val-whatTheyDo"></div>
+              </div>
+              <div class="dossier-section" id="dossier-sec-recentNews">
+                <div class="dossier-sec-title">Recent News</div>
+                <div class="dossier-sec-content" id="dossier-val-recentNews"></div>
+              </div>
+              <div class="dossier-section" id="dossier-sec-cultureValues">
+                <div class="dossier-sec-title">Culture &amp; Values</div>
+                <div class="dossier-sec-content" id="dossier-val-cultureValues"></div>
+              </div>
+              <div class="dossier-section" id="dossier-sec-likelyTopics">
+                <div class="dossier-sec-title">Likely Interview Topics</div>
+                <div class="dossier-sec-content" id="dossier-val-likelyTopics"></div>
+              </div>
+              <div class="dossier-section" id="dossier-sec-questionsToAsk">
+                <div class="dossier-sec-title">Questions to Ask Them</div>
+                <div class="dossier-sec-content" id="dossier-val-questionsToAsk"></div>
+              </div>
+              <div class="dossier-section hidden" id="dossier-sec-notes">
+                <div class="dossier-sec-title">From Your Notes</div>
+                <div class="dossier-sec-content" id="dossier-val-notes"></div>
+              </div>
+              <div class="dossier-citations-wrap hidden" id="dossier-citations-wrap">
+                <div class="dossier-sec-title">Sources &amp; Grounding</div>
+                <div class="dossier-citations-list" id="dossier-citations-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <label class="s-label" for="profile-star">STAR Stories &amp; Key Achievements <span class="s-hint">injected on behavioral questions</span></label>
         <textarea id="profile-star" rows="4" spellcheck="false" placeholder="3-5 bulleted STAR stories or metrics you want cue to draw from…"></textarea>
       </div>
@@ -422,6 +505,16 @@
           <button data-auto-answer="on">On</button>
         </div>
         <div class="s-note" id="auto-answer-note">Waits for a complete question and a natural pause on the other side of the call before answering. Ignores greetings, audio checks, and your own voice.</div>
+
+        <div class="autoanswer-log-card">
+          <div class="autoanswer-log-head">
+            <span class="s-label" style="margin:0;">Trigger history &amp; decision log</span>
+            <button id="refresh-autoanswer-log-btn" type="button" class="btn-ghost btn-xs">↻ Refresh log</button>
+          </div>
+          <div id="autoanswer-log-list" class="autoanswer-log-list">
+            <div class="s-note">No auto-answer decisions recorded yet.</div>
+          </div>
+        </div>
 
         <div class="whisper-card">
           <div class="whisper-runtime-row">
@@ -599,6 +692,29 @@
         </div>
       </div>
 
+      <!-- Tab: Companion -->
+      <div class="s-body s-tab-pane hidden" id="tab-companion" data-pane="companion">
+        <div class="companion-card">
+          <label class="s-label">Browser Companion</label>
+          <div class="s-note">Pair with the Cue Companion Chrome extension to capture web page DOM text and active tab selections directly into your prompts.</div>
+          <div class="companion-status-row">
+            <span class="companion-status-badge" id="companion-status-badge">Checking…</span>
+            <span class="companion-port-label" id="companion-port-label">Port: 4123</span>
+          </div>
+          <div class="companion-actions">
+            <button id="companion-arm-btn" class="s-action primary" type="button">Connect</button>
+            <button id="companion-capture-btn" class="s-action" type="button">Capture active tab</button>
+          </div>
+          <div id="companion-arm-status" class="s-note"></div>
+          <div class="s-field" style="margin-top:12px;">
+            <span>Auto-attach</span>
+            <label class="s-note" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input id="companion-auto-attach" type="checkbox" checked style="width:auto;" />
+              Automatically use captured page context in next answer
+            </label>
+          </div>
+        </div>
+      </div>
 
     </div>
   </div>

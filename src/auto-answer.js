@@ -7,6 +7,17 @@
     root.CueAutoAnswer = factory();
   }
 })(typeof window !== 'undefined' ? window : globalThis, function () {
+  // Common interviewer acknowledgements and backchannels (from SimpleAutoAnswer.ts)
+  const USER_BACKCHANNEL = /^(?:(?:yeah|yes|yep|yup|ya|mm-?hm+|mhm+|uh-?huh|ok(?:ay)?|right|sure|cool|got it|i see|nice|great|perfect|exactly|interesting|makes sense|sounds good|true|correct|wow|oh|ah|hm+|haha+|alright|of course|fair enough|no problem|totally|absolutely|definitely|indeed|good|fine)[\s,.!?-]*){1,4}$/i;
+
+  const STABILITY_MS = 900;
+  const JUDGE_DEADLINE_MS = 2500;
+  const JUDGE_CONTAINMENT_MIN = 0.65;
+  const JUDGE_TURN_CHAR_CAP = 400;
+  const JUDGE_CANDIDATE_CHAR_CAP = 1000;
+  const DISPATCH_THRESHOLD = 0.88;
+  const OFFER_THRESHOLD = 0.65;
+
   const AV_AND_LOGISTICS_RE = /\b(can you hear me|hear me okay|hear me alright|can you see my screen|see my screen|is my mic working|am i audible|am i on mute|you are on mute|you'?re on mute|let me share my screen|sharing my screen)\b/i;
 
   const GREETINGS_RE = /^(hi|hello|hey|good morning|good afternoon|good evening|how are you( doing| today)?|how'?s it going|how is it going|how was your weekend|how is your day( going)?|nice to meet you|great to meet you|pleasure to meet you|thanks for (joining|taking the time|coming)|where are you (calling|joining|based|located)( from)?|how is the weather)\b/i;
@@ -28,6 +39,30 @@
       .replace(/[^a-z0-9'\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  function normalizeForCompare(s) {
+    return String(s || '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function tokenContainment(needle, haystack) {
+    const nq = normalizeForCompare(needle).split(' ').filter(Boolean);
+    if (nq.length === 0) return 0;
+    const have = new Set(normalizeForCompare(haystack).split(' ').filter(Boolean));
+    let hit = 0;
+    for (const t of nq) {
+      if (have.has(t)) hit++;
+    }
+    return hit / nq.length;
+  }
+
+  function keepTail(text, max) {
+    const t = String(text ?? '');
+    return t.length <= max ? t : `…${t.slice(t.length - max)}`;
   }
 
   function cleanLeadingFillers(text) {
@@ -479,12 +514,492 @@
     };
   }
 
+  // ---------------- Section 2: SimpleAutoAnswer (Beta) ----------------
+
+  function buildJudgePrompt({ candidateText, recentTurns }) {
+    const kept = (recentTurns || []).slice(-8);
+    const context = kept
+      .map((t) => {
+        const text = keepTail(t.text, JUDGE_TURN_CHAR_CAP);
+        const speaker = t.channel === 'you' || t.role === 'user' ? 'USER' : 'OTHERS';
+        return `${speaker}: ${text}`;
+      })
+      .join('\n');
+    const candidate = keepTail(candidateText, JUDGE_CANDIDATE_CHAR_CAP);
+
+    return `You analyze a live conversation transcript to decide if the latest speech directed at the USER contains a question or task they should answer.
+Recent transcript (oldest first):
+${context || '(none)'}
+
+Latest speech:
+<candidate>
+${candidate}
+</candidate>
+
+Determine:
+1. isAsk: true if the candidate contains a question or actionable task directed at the USER to answer; false if it is small talk, self-answered, a statement, or incomplete.
+2. questionText: the extracted core question or task quoted verbatim from the candidate (or null if not an ask).
+3. confidence: a score between 0.0 and 1.0 representing how confident you are that the user wants an answer right now.
+
+Respond ONLY with this JSON format:
+{"isAsk": boolean, "questionText": string|null, "confidence": number}`;
+  }
+
+  function parseJudgeVerdict(raw, candidateText) {
+    if (!raw) return null;
+    let parsed = null;
+    if (typeof raw === 'object' && raw !== null) {
+      parsed = raw;
+    } else if (typeof raw === 'string') {
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start >= 0 && end > start) {
+        try {
+          parsed = JSON.parse(raw.slice(start, end + 1));
+        } catch (_) {
+          return null;
+        }
+      }
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const isAsk = parsed.isAsk !== undefined ? Boolean(parsed.isAsk) : Boolean(parsed.is_ask);
+    let confidence = typeof parsed.confidence === 'number'
+      ? parsed.confidence
+      : (typeof parsed.answerability === 'number' ? parsed.answerability : 0);
+    if (Number.isNaN(confidence)) confidence = 0;
+    confidence = Math.max(0, Math.min(1, confidence));
+
+    let questionText = null;
+    const rawQ = parsed.questionText !== undefined ? parsed.questionText : parsed.question_text;
+    if (typeof rawQ === 'string' && rawQ.trim()) {
+      questionText = rawQ.trim();
+    }
+
+    return { isAsk, questionText, confidence };
+  }
+
+  function createSimpleAutoAnswer(options = {}) {
+    const isEnabled = typeof options.isEnabled === 'function' ? options.isEnabled : () => (options.enabled !== undefined ? !!options.enabled : true);
+    const isCapturing = typeof options.isCapturing === 'function' ? options.isCapturing : () => (options.capturing !== undefined ? !!options.capturing : true);
+    const isBusy = typeof options.isBusy === 'function' ? options.isBusy : () => false;
+    const recentTurns = typeof options.recentTurns === 'function' ? options.recentTurns : () => [];
+    const judgeCandidate = typeof options.judgeCandidate === 'function' ? options.judgeCandidate : null;
+    const onDispatch = typeof options.onDispatch === 'function' ? options.onDispatch : () => {};
+    const onOffer = typeof options.onOffer === 'function' ? options.onOffer : () => {};
+
+    const clock = options.clock || {};
+    const now = clock.now || options.now || (() => Date.now());
+    const setTimer = clock.setTimeout || clock.setTimer || options.setTimer || ((fn, ms) => setTimeout(fn, ms));
+    const clearTimer = clock.clearTimeout || clock.clearTimer || options.clearTimer || ((id) => clearTimeout(id));
+
+    const stabilityMs = typeof options.stabilityMs === 'number' ? options.stabilityMs : STABILITY_MS;
+    const judgeDeadlineMs = typeof options.judgeDeadlineMs === 'number' ? options.judgeDeadlineMs : JUDGE_DEADLINE_MS;
+
+    let enabled = typeof options.enabled === 'boolean' ? options.enabled : true;
+    let capturing = typeof options.capturing === 'boolean' ? options.capturing : true;
+
+    let candidate = '';
+    let debounceTimer = null;
+    let themSpeaking = false;
+    let judgeSeq = 0;
+    let inFlightAbort = null;
+
+    const decisionLog = [];
+    const MAX_LOG = 50;
+
+    const answeredQuestions = new Set();
+    if (options.lastAnsweredText) {
+      const norm = normalizeForCompare(options.lastAnsweredText);
+      if (norm) answeredQuestions.add(norm);
+    }
+
+    function recordDecision(entry) {
+      const item = {
+        timestamp: entry.timestamp || now(),
+        candidate: entry.candidate || '',
+        verdict: entry.verdict || 'silent',
+        reason: entry.reason || '',
+        confidence: typeof entry.confidence === 'number' ? entry.confidence : 0,
+        extractedQuestion: entry.extractedQuestion || null
+      };
+      decisionLog.push(item);
+      if (decisionLog.length > MAX_LOG) {
+        decisionLog.shift();
+      }
+      return item;
+    }
+
+    function clearDebounceTimer() {
+      if (debounceTimer !== null) {
+        clearTimer(debounceTimer);
+        debounceTimer = null;
+      }
+    }
+
+    function restartStabilityWindow() {
+      clearDebounceTimer();
+      debounceTimer = setTimer(() => {
+        debounceTimer = null;
+        if (themSpeaking) {
+          return;
+        }
+        onStoppage();
+      }, stabilityMs);
+    }
+
+    async function onStoppage() {
+      const effectiveEnabled = typeof options.isEnabled === 'function' ? options.isEnabled() : enabled;
+      const effectiveCapturing = typeof options.isCapturing === 'function' ? options.isCapturing() : capturing;
+
+      if (!effectiveEnabled || !effectiveCapturing) {
+        return;
+      }
+
+      const candidateText = candidate.trim();
+      if (!candidateText) {
+        return;
+      }
+
+      // Gate check: engine busy
+      if (isBusy()) {
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'silent',
+          reason: 'engine_busy',
+          confidence: 0,
+          extractedQuestion: null
+        });
+        return;
+      }
+
+      // Prefilter 1: Duplicate check (normalized token hash)
+      const candidateNorm = normalizeForCompare(candidateText);
+      if (answeredQuestions.has(candidateNorm)) {
+        candidate = '';
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'silent',
+          reason: 'duplicate',
+          confidence: 0,
+          extractedQuestion: null
+        });
+        return;
+      }
+
+      // Prefilter 2: Backchannel check
+      if (USER_BACKCHANNEL.test(candidateText) || isSmallTalkOrLogistics(candidateText)) {
+        candidate = '';
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'silent',
+          reason: 'backchannel',
+          confidence: 0,
+          extractedQuestion: null
+        });
+        return;
+      }
+
+      // Prefilter 3: Too short check (< 4 words and does not end with '?')
+      const words = candidateText.split(/\s+/).filter(Boolean);
+      if (words.length < 4 && !/\?\s*$/.test(candidateText)) {
+        candidate = '';
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'silent',
+          reason: 'too_short',
+          confidence: 0,
+          extractedQuestion: null
+        });
+        return;
+      }
+
+      // Passed prefilter: exactly ONE judge call per stoppage
+      const currentSeq = ++judgeSeq;
+      if (inFlightAbort) {
+        try { inFlightAbort.abort(); } catch (_) {}
+        inFlightAbort = null;
+      }
+      const abort = typeof AbortController !== 'undefined' ? new AbortController() : { abort() {}, signal: null };
+      inFlightAbort = abort;
+
+      let deadlineTimer = null;
+      let timedOut = false;
+      let judgeResult = null;
+      let judgeError = null;
+
+      if (!judgeCandidate) {
+        executeFallback(candidateText, 'judge_error_fallback');
+        return;
+      }
+
+      try {
+        const turns = (typeof recentTurns === 'function' ? recentTurns() : []).slice(-8);
+        const judgePromise = judgeCandidate({
+          candidateText,
+          recentTurns: turns
+        }, abort.signal);
+
+        const timeoutPromise = new Promise((resolve) => {
+          deadlineTimer = setTimer(() => {
+            timedOut = true;
+            try { abort.abort(); } catch (_) {}
+            resolve(null);
+          }, judgeDeadlineMs);
+        });
+
+        judgeResult = await Promise.race([judgePromise, timeoutPromise]);
+      } catch (err) {
+        judgeError = err;
+      } finally {
+        if (deadlineTimer !== null) {
+          clearTimer(deadlineTimer);
+          deadlineTimer = null;
+        }
+        if (inFlightAbort === abort) {
+          inFlightAbort = null;
+        }
+      }
+
+      // Supersede check: if new speech arrived during judge call, discard verdict
+      if (currentSeq !== judgeSeq) {
+        return;
+      }
+
+      if (timedOut) {
+        executeFallback(candidateText, 'judge_timeout_fallback');
+        return;
+      }
+
+      if (judgeError !== null || judgeResult === null || judgeResult === undefined) {
+        executeFallback(candidateText, 'judge_error_fallback');
+        return;
+      }
+
+      const verdictObj = parseJudgeVerdict(judgeResult, candidateText);
+      if (!verdictObj) {
+        executeFallback(candidateText, 'judge_error_fallback');
+        return;
+      }
+
+      // Containment check
+      if (verdictObj.questionText) {
+        const containment = tokenContainment(verdictObj.questionText, candidateText);
+        if (containment < JUDGE_CONTAINMENT_MIN) {
+          candidate = '';
+          recordDecision({
+            timestamp: now(),
+            candidate: candidateText,
+            verdict: 'silent',
+            reason: 'containment_failed',
+            confidence: verdictObj.confidence,
+            extractedQuestion: verdictObj.questionText
+          });
+          return;
+        }
+      }
+
+      const extracted = verdictObj.questionText || candidateText;
+
+      if (!verdictObj.isAsk) {
+        candidate = '';
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'silent',
+          reason: 'not_ask',
+          confidence: verdictObj.confidence,
+          extractedQuestion: extracted
+        });
+        return;
+      }
+
+      if (verdictObj.confidence >= DISPATCH_THRESHOLD) {
+        answeredQuestions.add(candidateNorm);
+        answeredQuestions.add(normalizeForCompare(extracted));
+        candidate = '';
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'dispatch',
+          reason: 'confidence_high',
+          confidence: verdictObj.confidence,
+          extractedQuestion: extracted
+        });
+        onDispatch(extracted);
+        return;
+      }
+
+      if (verdictObj.confidence >= OFFER_THRESHOLD) {
+        candidate = '';
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'offer',
+          reason: 'confidence_medium',
+          confidence: verdictObj.confidence,
+          extractedQuestion: extracted
+        });
+        onOffer(extracted);
+        return;
+      }
+
+      candidate = '';
+      recordDecision({
+        timestamp: now(),
+        candidate: candidateText,
+        verdict: 'silent',
+        reason: 'below_threshold',
+        confidence: verdictObj.confidence,
+        extractedQuestion: extracted
+      });
+    }
+
+    function executeFallback(candidateText, reason) {
+      candidate = '';
+      const candidateNorm = normalizeForCompare(candidateText);
+      if (/\?\s*$/.test(candidateText)) {
+        answeredQuestions.add(candidateNorm);
+        candidate = '';
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'dispatch',
+          reason,
+          confidence: 1.0,
+          extractedQuestion: candidateText
+        });
+        onDispatch(candidateText);
+      } else {
+        recordDecision({
+          timestamp: now(),
+          candidate: candidateText,
+          verdict: 'silent',
+          reason,
+          confidence: 0,
+          extractedQuestion: null
+        });
+      }
+    }
+
+    return {
+      setConfig(patch = {}) {
+        if (typeof patch.enabled === 'boolean') enabled = patch.enabled;
+        if (typeof patch.capturing === 'boolean') capturing = patch.capturing;
+        if (!enabled || !capturing) {
+          clearDebounceTimer();
+          judgeSeq++;
+          if (inFlightAbort) {
+            try { inFlightAbort.abort(); } catch (_) {}
+            inFlightAbort = null;
+          }
+        }
+      },
+
+      onVadState(channel, speaking) {
+        if (channel === 'them') {
+          themSpeaking = Boolean(speaking);
+          if (themSpeaking) {
+            judgeSeq++;
+            if (inFlightAbort) {
+              try { inFlightAbort.abort(); } catch (_) {}
+              inFlightAbort = null;
+            }
+            clearDebounceTimer();
+          } else {
+            if (candidate.trim()) {
+              restartStabilityWindow();
+            }
+          }
+        }
+      },
+
+      onThemInterim(text) {
+        if (!text || !String(text).trim()) return;
+        judgeSeq++;
+        if (inFlightAbort) {
+          try { inFlightAbort.abort(); } catch (_) {}
+          inFlightAbort = null;
+        }
+        restartStabilityWindow();
+      },
+
+      onThemFinal(text) {
+        const clean = String(text || '').trim();
+        if (!clean) return;
+        judgeSeq++;
+        if (inFlightAbort) {
+          try { inFlightAbort.abort(); } catch (_) {}
+          inFlightAbort = null;
+        }
+        candidate = candidate ? (candidate + ' ' + clean).trim() : clean;
+        restartStabilityWindow();
+      },
+
+      onYouFinal(_text) {
+        // Inert user channel: mic is transcribed for context, but inert for triggers.
+      },
+
+      recordConfirmation(questionText) {
+        if (questionText) {
+          answeredQuestions.add(normalizeForCompare(questionText));
+        }
+      },
+
+      recordDismissal(questionText) {
+        if (questionText) {
+          answeredQuestions.add(normalizeForCompare(questionText));
+        }
+      },
+
+      cancel() {
+        clearDebounceTimer();
+        judgeSeq++;
+        if (inFlightAbort) {
+          try { inFlightAbort.abort(); } catch (_) {}
+          inFlightAbort = null;
+        }
+        candidate = '';
+      },
+
+      getDecisionLog() {
+        return [...decisionLog];
+      },
+
+      getState() {
+        return {
+          enabled: typeof options.isEnabled === 'function' ? options.isEnabled() : enabled,
+          capturing: typeof options.isCapturing === 'function' ? options.isCapturing() : capturing,
+          candidate,
+          themSpeaking,
+          judgeInFlight: inFlightAbort !== null
+        };
+      }
+    };
+  }
+
   return {
     normalizeText,
     isSmallTalkOrLogistics,
     hasDanglingEnding,
     stripDanglingEnding,
     evaluateQuestionCandidate,
-    createAutoAnswerController
+    createAutoAnswerController,
+    // Section 2: SimpleAutoAnswer (Beta)
+    USER_BACKCHANNEL,
+    STABILITY_MS,
+    JUDGE_DEADLINE_MS,
+    JUDGE_CONTAINMENT_MIN,
+    DISPATCH_THRESHOLD,
+    OFFER_THRESHOLD,
+    normalizeForCompare,
+    tokenContainment,
+    buildJudgePrompt,
+    parseJudgeVerdict,
+    createSimpleAutoAnswer
   };
 });

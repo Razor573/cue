@@ -46,6 +46,9 @@ const DEFAULTS = {
   },
   smart: false,
   autoAnswer: false,
+  followupResolver: true,
+  claimValidator: false,
+  latencyTracer: true,
   // Meeting (system) audio. macOS has no way to capture system audio except through
   // a ScreenCaptureKit display-capture session, and the OS then shows its
   // screen-recording indicator in the menu bar and lists cue under Control Center's
@@ -91,6 +94,8 @@ const DEFAULTS = {
   // Tab 2: Profile
   resumeText: '',
   jobDescription: '',
+  companyDossiers: {},
+  currentDossier: null,
   // Tab 3: Interview Prep
   starStories: '',       // 3-5 behavioral STAR stories in plain English
   whyCompany: '',        // Why do you want to work here?
@@ -243,6 +248,9 @@ function stripRendererPatch(patch) {
       .map((p) => (typeof p === 'string' ? p.trim() : ''))
       .filter(Boolean);
   }
+  if (out.followupResolver !== undefined) out.followupResolver = Boolean(out.followupResolver);
+  if (out.claimValidator !== undefined) out.claimValidator = Boolean(out.claimValidator);
+  if (out.latencyTracer !== undefined) out.latencyTracer = Boolean(out.latencyTracer);
   return out;
 }
 
@@ -302,6 +310,9 @@ module.exports = {
     nextSettings.baseUrl = normalizeBaseUrl(nextSettings.baseUrl);
     nextSettings.opacity = clampOpacity(nextSettings.opacity);
     nextSettings.rotationProviders = sanitizeRotationProviders(nextSettings.rotationProviders, nextSettings.provider);
+    if (typeof nextSettings.followupResolver !== 'boolean') nextSettings.followupResolver = DEFAULTS.followupResolver;
+    if (typeof nextSettings.claimValidator !== 'boolean') nextSettings.claimValidator = DEFAULTS.claimValidator;
+    if (typeof nextSettings.latencyTracer !== 'boolean') nextSettings.latencyTracer = DEFAULTS.latencyTracer;
     data = nextSettings;
     save();
     return data;

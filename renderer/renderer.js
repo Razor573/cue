@@ -986,6 +986,102 @@
     });
   }
 
+  // Auto-Answer Suggestion Card and Decision Log
+  const offerCard = document.getElementById('autoanswer-offer-card');
+  const offerCardText = document.getElementById('offer-card-text');
+  const offerCardAnswer = document.getElementById('offer-card-answer');
+  const offerCardDismiss = document.getElementById('offer-card-dismiss');
+  const offerCardClose = document.getElementById('offer-card-close');
+  let currentOfferQuestion = '';
+
+  function showOfferCard(questionText) {
+    if (!offerCard || !offerCardText) return;
+    currentOfferQuestion = questionText;
+    offerCardText.textContent = `"${questionText}"`;
+    offerCard.classList.remove('hidden');
+  }
+
+  function hideOfferCard() {
+    if (!offerCard) return;
+    offerCard.classList.add('hidden');
+    currentOfferQuestion = '';
+  }
+
+  if (offerCardAnswer) {
+    offerCardAnswer.addEventListener('click', async () => {
+      const q = currentOfferQuestion;
+      hideOfferCard();
+      if (q && cue && cue.autoAnswerConfirm) {
+        await cue.autoAnswerConfirm(q);
+      }
+    });
+  }
+
+  if (offerCardDismiss) {
+    offerCardDismiss.addEventListener('click', async () => {
+      const q = currentOfferQuestion;
+      hideOfferCard();
+      if (cue && cue.autoAnswerDismiss) {
+        await cue.autoAnswerDismiss(q);
+      }
+    });
+  }
+
+  if (offerCardClose) {
+    offerCardClose.addEventListener('click', async () => {
+      const q = currentOfferQuestion;
+      hideOfferCard();
+      if (cue && cue.autoAnswerDismiss) {
+        await cue.autoAnswerDismiss(q);
+      }
+    });
+  }
+
+  cue.on('autoanswer:offer', ({ questionText }) => {
+    showOfferCard(questionText);
+  });
+
+  async function refreshAutoAnswerLog() {
+    const listEl = document.getElementById('autoanswer-log-list');
+    if (!listEl || !cue || !cue.autoAnswerGetLog) return;
+    try {
+      const log = await cue.autoAnswerGetLog();
+      if (!log || log.length === 0) {
+        listEl.innerHTML = '<div class="s-note">No auto-answer decisions recorded yet.</div>';
+        return;
+      }
+      listEl.innerHTML = '';
+      const items = [...log].reverse();
+      for (const item of items) {
+        const row = document.createElement('div');
+        row.className = 'autoanswer-log-item';
+        const timeStr = new Date(item.timestamp).toLocaleTimeString();
+        const badgeClass = `autoanswer-badge-${item.verdict || 'silent'}`;
+        const confStr = typeof item.confidence === 'number' ? `(${(item.confidence * 100).toFixed(0)}%)` : '';
+        const cand = item.candidate ? item.candidate.replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m]) : '';
+        const ext = item.extractedQuestion ? item.extractedQuestion.replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m]) : '';
+        row.innerHTML = `
+          <div style="flex:1;">
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="${badgeClass}">${(item.verdict || 'silent').toUpperCase()}</span>
+              <span class="autoanswer-log-meta">${timeStr} · ${(item.reason || '')} ${confStr}</span>
+            </div>
+            <div class="autoanswer-log-cand">"${cand}"</div>
+            ${item.extractedQuestion && item.extractedQuestion !== item.candidate ? `<div class="autoanswer-log-meta" style="color:var(--accent-hover);margin-top:2px;">Extracted: "${ext}"</div>` : ''}
+          </div>
+        `;
+        listEl.appendChild(row);
+      }
+    } catch (e) {
+      listEl.innerHTML = `<div class="s-note warn">Failed to load decision log: ${e.message}</div>`;
+    }
+  }
+
+  const refreshLogBtn = document.getElementById('refresh-autoanswer-log-btn');
+  if (refreshLogBtn) {
+    refreshLogBtn.addEventListener('click', () => refreshAutoAnswerLog());
+  }
+
   // Hide / collapse
   let reopenSidebarOnExpand = false;
   function toggleHide() {
@@ -1913,6 +2009,88 @@
   }
   $('#more-btn').addEventListener('click', openSettings);
   $('#tb-settings-btn').addEventListener('click', openSettings);
+
+  // Companion state & chip handling
+  cue.on('companion:captured', ({ title }) => {
+    const chipBar = $('#companion-chip-bar');
+    const chipTitle = $('#companion-chip-title');
+    if (chipBar && chipTitle) {
+      chipTitle.textContent = `Captured: ${title || 'Web Page'}`;
+      chipBar.classList.remove('hidden');
+    }
+    showStatus(`Browser context captured: ${title || 'Web Page'}`);
+  });
+
+  cue.on('companion:consumed', () => {
+    const chipBar = $('#companion-chip-bar');
+    if (chipBar) chipBar.classList.add('hidden');
+  });
+
+  const chipDismiss = $('#companion-chip-dismiss');
+  if (chipDismiss) {
+    chipDismiss.addEventListener('click', () => {
+      const chipBar = $('#companion-chip-bar');
+      if (chipBar) chipBar.classList.add('hidden');
+    });
+  }
+
+  // Companion Settings tab interactions
+  let companionArmTimer = null;
+  async function refreshCompanionStatus() {
+    if (!cue.companionStatus) return;
+    const status = await cue.companionStatus();
+    const badge = $('#companion-status-badge');
+    const portLabel = $('#companion-port-label');
+    if (badge) {
+      badge.classList.remove('connected', 'armed');
+      if (status && status.paired) {
+        badge.textContent = 'Connected';
+        badge.classList.add('connected');
+      } else {
+        badge.textContent = 'Not paired';
+      }
+    }
+    if (portLabel && status && status.port) {
+      portLabel.textContent = `Port: ${status.port}`;
+    }
+  }
+
+  const armBtn = $('#companion-arm-btn');
+  if (armBtn) {
+    armBtn.addEventListener('click', async () => {
+      if (!cue.companionPairArm) return;
+      const res = await cue.companionPairArm();
+      if (!res.ok) return;
+      const statusNote = $('#companion-arm-status');
+      const badge = $('#companion-status-badge');
+      if (badge) {
+        badge.textContent = 'Arming pairing window…';
+        badge.classList.add('armed');
+      }
+      let remaining = 60;
+      clearInterval(companionArmTimer);
+      if (statusNote) statusNote.textContent = `Pairing window open (${remaining}s). Click "Pair with Cue" in the Chrome extension.`;
+      companionArmTimer = setInterval(() => {
+        remaining--;
+        if (remaining <= 0) {
+          clearInterval(companionArmTimer);
+          if (statusNote) statusNote.textContent = '';
+          void refreshCompanionStatus();
+        } else if (statusNote) {
+          statusNote.textContent = `Pairing window open (${remaining}s). Click "Pair with Cue" in the Chrome extension.`;
+        }
+      }, 1000);
+    });
+  }
+
+  const triggerCaptureBtn = $('#companion-capture-btn');
+  if (triggerCaptureBtn) {
+    triggerCaptureBtn.addEventListener('click', async () => {
+      if (!cue.companionTriggerCapture) return;
+      await cue.companionTriggerCapture();
+      showStatus('Capture request sent to Chrome extension.');
+    });
+  }
   $('#s-close').addEventListener('click', () => { void closeSettings(); });
   scrim.addEventListener('click', (e) => { if (e.target === scrim) void closeSettings(); });
 
@@ -1926,6 +2104,7 @@
       tab.classList.add('on');
       const pane = document.querySelector(`.s-tab-pane[data-pane="${tab.dataset.tab}"]`);
       if (pane) pane.classList.remove('hidden');
+      if (tab.dataset.tab === 'companion') void refreshCompanionStatus();
     });
   });
 
@@ -2391,6 +2570,212 @@
     });
   }
 
+  // ---- Company Dossier ----------------------------------------------------
+  function renderDossierCard(dossier) {
+    const card = $('#dossier-card');
+    const clearBtn = $('#dossier-clear-btn');
+    const candidatesWrap = $('#dossier-candidates-wrap');
+    if (candidatesWrap) candidatesWrap.classList.add('hidden');
+    if (!card) return;
+
+    if (!dossier || !dossier.company) {
+      card.classList.add('hidden');
+      if (clearBtn) clearBtn.classList.add('hidden');
+      return;
+    }
+
+    card.classList.remove('hidden');
+    if (clearBtn) clearBtn.classList.remove('hidden');
+
+    const nameEl = $('#dossier-company-name');
+    if (nameEl) nameEl.textContent = dossier.company;
+
+    const badge = $('#dossier-badge');
+    if (badge) {
+      badge.className = 'dossier-badge';
+      if (dossier.isNotesOnly) {
+        badge.textContent = 'Notes only';
+        badge.classList.add('notes-only');
+      } else if (dossier.isGrounded) {
+        const count = (dossier.citations && dossier.citations.length) || 0;
+        badge.textContent = `Grounded (${count})`;
+        badge.classList.add('grounded');
+      } else {
+        badge.textContent = 'Ungrounded';
+        badge.classList.add('ungrounded');
+      }
+    }
+
+    const timeEl = $('#dossier-time');
+    if (timeEl) {
+      if (dossier.lastUpdated) {
+        try {
+          timeEl.textContent = new Date(dossier.lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } catch {
+          timeEl.textContent = '';
+        }
+      } else {
+        timeEl.textContent = '';
+      }
+    }
+
+    const sec = dossier.sections || {};
+    if ($('#dossier-val-overview')) $('#dossier-val-overview').textContent = sec.overview || 'Unknown';
+    if ($('#dossier-val-whatTheyDo')) $('#dossier-val-whatTheyDo').textContent = sec.whatTheyDo || 'Unknown';
+    if ($('#dossier-val-recentNews')) $('#dossier-val-recentNews').textContent = sec.recentNews || 'Unknown';
+    if ($('#dossier-val-cultureValues')) $('#dossier-val-cultureValues').textContent = sec.cultureValues || 'Unknown';
+    if ($('#dossier-val-likelyTopics')) $('#dossier-val-likelyTopics').textContent = sec.likelyTopics || 'Unknown';
+    if ($('#dossier-val-questionsToAsk')) $('#dossier-val-questionsToAsk').textContent = sec.questionsToAsk || 'Unknown';
+
+    const notesSec = $('#dossier-sec-notes');
+    if (notesSec) {
+      if (dossier.notesExcerpt && dossier.notesExcerpt.trim()) {
+        notesSec.classList.remove('hidden');
+        if ($('#dossier-val-notes')) $('#dossier-val-notes').textContent = dossier.notesExcerpt;
+      } else {
+        notesSec.classList.add('hidden');
+      }
+    }
+
+    const citationsWrap = $('#dossier-citations-wrap');
+    const citationsList = $('#dossier-citations-list');
+    if (citationsWrap && citationsList) {
+      if (Array.isArray(dossier.citations) && dossier.citations.length > 0) {
+        citationsWrap.classList.remove('hidden');
+        citationsList.innerHTML = '';
+        for (const cit of dossier.citations) {
+          const a = document.createElement('a');
+          a.className = 'dossier-citation-link';
+          a.href = '#';
+          a.textContent = `↗ ${cit.title || cit.url}`;
+          a.title = cit.url;
+          a.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            cue.openPane(cit.url);
+          });
+          citationsList.appendChild(a);
+        }
+      } else {
+        citationsWrap.classList.add('hidden');
+      }
+    }
+  }
+
+  function showDossierCandidates(candidates, jdText) {
+    const wrap = $('#dossier-candidates-wrap');
+    const list = $('#dossier-candidates-list');
+    if (!wrap || !list) return;
+    wrap.classList.remove('hidden');
+    list.innerHTML = '';
+    for (const c of candidates) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dossier-candidate-btn';
+      btn.textContent = c;
+      btn.addEventListener('click', () => {
+        wrap.classList.add('hidden');
+        void executeDossierResearch(c, jdText);
+      });
+      list.appendChild(btn);
+    }
+  }
+
+  async function executeDossierResearch(company, jdText) {
+    const researchBtn = $('#dossier-research-btn');
+    const spinner = $('#dossier-spinner');
+    const statusMsg = $('#dossier-status-msg');
+    if (researchBtn) researchBtn.disabled = true;
+    if (spinner) spinner.classList.remove('hidden');
+    if (statusMsg) {
+      statusMsg.textContent = `Researching ${company}…`;
+      statusMsg.style.color = 'var(--tx-dim)';
+    }
+    try {
+      const dossier = await cue.dossierResearch({ company, jdText });
+      renderDossierCard(dossier);
+      if (statusMsg) statusMsg.textContent = '';
+    } catch (err) {
+      if (statusMsg) {
+        statusMsg.textContent = `Research error: ${err.message || String(err)}`;
+        statusMsg.style.color = 'var(--red)';
+      }
+    } finally {
+      if (researchBtn) researchBtn.disabled = false;
+      if (spinner) spinner.classList.add('hidden');
+    }
+  }
+
+  const dossierResearchBtn = $('#dossier-research-btn');
+  if (dossierResearchBtn) {
+    dossierResearchBtn.addEventListener('click', async () => {
+      const jd = ($('#profile-jd') && $('#profile-jd').value.trim()) || '';
+      const statusMsg = $('#dossier-status-msg');
+      if (!jd) {
+        if (statusMsg) {
+          statusMsg.textContent = 'Paste a Target Job Description above first.';
+          statusMsg.style.color = 'var(--amber)';
+        }
+        return;
+      }
+      if (statusMsg) statusMsg.textContent = 'Extracting company…';
+      try {
+        const extraction = await cue.dossierExtract(jd);
+        if (!extraction || !extraction.company) {
+          if (statusMsg) {
+            statusMsg.textContent = 'Could not identify a company name from the Job Description.';
+            statusMsg.style.color = 'var(--amber)';
+          }
+          return;
+        }
+        if (extraction.ambiguous && extraction.candidates && extraction.candidates.length > 1) {
+          showDossierCandidates(extraction.candidates, jd);
+          if (statusMsg) statusMsg.textContent = `Multiple candidates found. Select one or research top candidate (${extraction.company}).`;
+          return;
+        }
+        await executeDossierResearch(extraction.company, jd);
+      } catch (err) {
+        if (statusMsg) {
+          statusMsg.textContent = `Failed to extract company: ${err.message || String(err)}`;
+          statusMsg.style.color = 'var(--red)';
+        }
+      }
+    });
+  }
+
+  const dossierClearBtn = $('#dossier-clear-btn');
+  if (dossierClearBtn) {
+    dossierClearBtn.addEventListener('click', async () => {
+      await cue.dossierClear();
+      renderDossierCard(null);
+      const statusMsg = $('#dossier-status-msg');
+      if (statusMsg) statusMsg.textContent = '';
+    });
+  }
+
+  const dossierRefreshBtn = $('#dossier-refresh-btn');
+  if (dossierRefreshBtn) {
+    dossierRefreshBtn.addEventListener('click', async () => {
+      const company = ($('#dossier-company-name') && $('#dossier-company-name').textContent) || '';
+      if (!company) return;
+      const jd = ($('#profile-jd') && $('#profile-jd').value.trim()) || '';
+      await executeDossierResearch(company, jd);
+    });
+  }
+
+  const profileJdEl = $('#profile-jd');
+  if (profileJdEl) {
+    profileJdEl.addEventListener('input', () => {
+      if (!profileJdEl.value.trim()) {
+        cue.dossierClear().catch(() => {});
+        renderDossierCard(null);
+      }
+    });
+  }
+
+  cue.on('dossier:updated', (dossier) => {
+    renderDossierCard(dossier);
+  });
+
   // ---- publik API (packaged-build default) --------------------------------
   function publikActionButton(action) {
     if (!action || !action.kind) return null;
@@ -2626,6 +3011,7 @@
     // Profile tab
     if ($('#profile-resume')) $('#profile-resume').value = settings.resumeText || '';
     if ($('#profile-jd')) $('#profile-jd').value = settings.jobDescription || '';
+    renderDossierCard(settings.currentDossier);
     if ($('#profile-star')) $('#profile-star').value = settings.starStories || '';
     // Transcription tab
     document.querySelectorAll('#meeting-audio-seg button').forEach((button) => {

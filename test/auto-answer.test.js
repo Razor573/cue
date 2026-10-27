@@ -6,7 +6,10 @@ const {
   isSmallTalkOrLogistics,
   hasDanglingEnding,
   evaluateQuestionCandidate,
-  createAutoAnswerController
+  createAutoAnswerController,
+  createSimpleAutoAnswer,
+  tokenContainment,
+  normalizeForCompare
 } = require('../src/auto-answer');
 
 function createFakeClock() {
@@ -267,5 +270,251 @@ test('AutoAnswerController state machine handles pauses, continuations, and self
     assert.equal(ctrl.getState().state, 'quiet');
     clock.advance(2000);
     assert.equal(triggered.length, 1, 'duplicate question within 10s must be ignored');
+  });
+});
+
+// ==================== Section 2: SimpleAutoAnswer Tests ====================
+
+const flush = () => new Promise((r) => setImmediate(r));
+
+test('SimpleAutoAnswer engine handles prefilters, fast model judging, fallbacks, supersede, inert user, and gate checks', async (t) => {
+  await t.test('prefilter skips duplicate, backchannel, and short utterances with correct log reasons', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    const offers = [];
+
+    const auto = createSimpleAutoAnswer({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      onOffer: (q) => offers.push(q),
+      judgeCandidate: async () => ({ isAsk: true, confidence: 0.95, questionText: 'How do you shard data?' })
+    });
+
+    // 1. Backchannels
+    const backchannels = ['yeah', 'cool', 'sounds good', 'makes sense'];
+    for (const b of backchannels) {
+      auto.onThemFinal(b);
+      clock.advance(950);
+      await flush();
+      const log = auto.getDecisionLog();
+      assert.equal(log[log.length - 1].verdict, 'silent');
+      assert.equal(log[log.length - 1].reason, 'backchannel');
+    }
+
+    // 2. Too short (<4 words no '?')
+    auto.onThemFinal('We deploy Kubernetes.');
+    clock.advance(950);
+    await flush();
+    let log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'silent');
+    assert.equal(log[log.length - 1].reason, 'too_short');
+
+    // Utterance with < 4 words but ending with '?' must NOT be skipped as too_short
+    auto.onThemFinal('Why not?');
+    clock.advance(950);
+    await flush();
+    log = auto.getDecisionLog();
+    assert.notEqual(log[log.length - 1].reason, 'too_short');
+
+    // 3. Duplicate check
+    auto.onThemFinal('How do you shard data in your production database?');
+    clock.advance(950);
+    await flush();
+    assert.equal(dispatches.length, 1);
+
+    // Send normalized duplicate
+    auto.onThemFinal('how do you shard data in your production database');
+    clock.advance(950);
+    await flush();
+    log = auto.getDecisionLog();
+    assert.equal(dispatches.length, 1, 'Duplicate utterance must not trigger second dispatch');
+    assert.equal(log[log.length - 1].verdict, 'silent');
+    assert.equal(log[log.length - 1].reason, 'duplicate');
+  });
+
+  await t.test('fast model judge routes confidence >= 0.88 to dispatch, >= 0.65 to offer, and rejects ungrounded extraction', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    const offers = [];
+    let judgeReturn = null;
+
+    const auto = createSimpleAutoAnswer({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      onOffer: (q) => offers.push(q),
+      judgeCandidate: async () => judgeReturn
+    });
+
+    // High confidence (>= 0.88) -> dispatch
+    judgeReturn = { isAsk: true, confidence: 0.92, questionText: 'How do you handle API rate limits?' };
+    auto.onThemFinal('How do you handle API rate limits across microservices?');
+    clock.advance(950);
+    await flush();
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'How do you handle API rate limits?');
+    let log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'dispatch');
+    assert.equal(log[log.length - 1].confidence, 0.92);
+
+    // Medium confidence (>= 0.65) -> offer
+    judgeReturn = { isAsk: true, confidence: 0.72, questionText: 'Should we move to the next slide?' };
+    auto.onThemFinal('Should we move to the next slide now?');
+    clock.advance(950);
+    await flush();
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0], 'Should we move to the next slide?');
+    log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'offer');
+    assert.equal(log[log.length - 1].confidence, 0.72);
+
+    // Low confidence (< 0.65) -> silent
+    judgeReturn = { isAsk: true, confidence: 0.45, questionText: 'Maybe it is getting late today?' };
+    auto.onThemFinal('Maybe it is getting late today?');
+    clock.advance(950);
+    await flush();
+    assert.equal(dispatches.length, 1);
+    assert.equal(offers.length, 1);
+    log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'silent');
+    assert.equal(log[log.length - 1].reason, 'below_threshold');
+
+    // Extracted question with token containment < 0.65 -> rejected as hallucinated
+    judgeReturn = { isAsk: true, confidence: 0.98, questionText: 'Unrelated hallucination about rainy Seattle weather' };
+    auto.onThemFinal('What is your philosophy on test-driven development?');
+    clock.advance(950);
+    await flush();
+    assert.equal(dispatches.length, 1);
+    assert.equal(offers.length, 1);
+    log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'silent');
+    assert.equal(log[log.length - 1].reason, 'containment_failed');
+  });
+
+  await t.test('judge timeout (>2500ms) falls back to ends-with-? rule', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+
+    const auto = createSimpleAutoAnswer({
+      clock,
+      judgeDeadlineMs: 2500,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: () => new Promise(() => {}) // never resolves (hangs)
+    });
+
+    // Ends with '?' -> dispatch on timeout fallback
+    auto.onThemFinal('Can you explain event sourcing and CQRS?');
+    clock.advance(950); // triggers stoppage and arms deadline
+    clock.advance(2600); // triggers deadline timeout
+    await flush();
+
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'Can you explain event sourcing and CQRS?');
+    let log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'dispatch');
+    assert.equal(log[log.length - 1].reason, 'judge_timeout_fallback');
+
+    // Does not end with '?' -> silent on timeout fallback
+    auto.onThemFinal('Walk me through your database failover mechanism');
+    clock.advance(950);
+    clock.advance(2600);
+    await flush();
+
+    assert.equal(dispatches.length, 1, 'Non-? utterance must stay silent on timeout fallback');
+    log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'silent');
+    assert.equal(log[log.length - 1].reason, 'judge_timeout_fallback');
+  });
+
+  await t.test('new them utterance while judge is in flight supersedes and ignores in-flight verdict', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    let resolveJudge1 = null;
+
+    const auto = createSimpleAutoAnswer({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: ({ candidateText }) => {
+        if (candidateText.includes('cache invalidation')) {
+          return Promise.resolve({
+            isAsk: true,
+            confidence: 0.95,
+            questionText: 'Can you explain how you handle cache invalidation across regions?'
+          });
+        }
+        return new Promise((resolve) => {
+          resolveJudge1 = resolve;
+        });
+      }
+    });
+
+    // Part 1
+    auto.onThemFinal('Can you explain how you handle');
+    clock.advance(950); // Stoppage 1 fires, judge 1 in flight
+
+    // New speech arrives while judge 1 is in flight
+    auto.onThemFinal('cache invalidation across regions?');
+
+    // Judge 1 resolves now
+    if (resolveJudge1) {
+      resolveJudge1({ isAsk: true, confidence: 0.95, questionText: 'Can you explain how you handle' });
+    }
+    await flush();
+    assert.equal(dispatches.length, 0, 'In-flight verdict from superseded speech must be discarded');
+
+    // Advance for combined speech stoppage
+    clock.advance(950);
+    await flush();
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'Can you explain how you handle cache invalidation across regions?');
+  });
+
+  await t.test('inert user channel: you turns never clear candidate or abort answers', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+
+    const auto = createSimpleAutoAnswer({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: async () => ({
+        isAsk: true,
+        confidence: 0.95,
+        questionText: 'What are your salary expectations for this position?'
+      })
+    });
+
+    auto.onThemFinal('What are your salary expectations for this position?');
+    // User speaks while stability window is counting down
+    auto.onYouFinal('Um, let me consider that.');
+    auto.onVadState('you', true);
+    auto.onVadState('you', false);
+
+    // Stoppage must still trigger
+    clock.advance(950);
+    await flush();
+
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'What are your salary expectations for this position?');
+  });
+
+  await t.test('gate check skips candidate when engine is busy', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    let busyState = true;
+
+    const auto = createSimpleAutoAnswer({
+      clock,
+      isBusy: () => busyState,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: async () => ({ isAsk: true, confidence: 0.95 })
+    });
+
+    auto.onThemFinal('How do you design a distributed lock with Redis?');
+    clock.advance(950);
+    await flush();
+
+    assert.equal(dispatches.length, 0, 'Must not dispatch while engine is busy');
+    const log = auto.getDecisionLog();
+    assert.equal(log[log.length - 1].verdict, 'silent');
+    assert.equal(log[log.length - 1].reason, 'engine_busy');
   });
 });

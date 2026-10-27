@@ -63,6 +63,18 @@ contextBridge.exposeInMainWorld('cue', {
   permissionsRequest: () => ipcRenderer.invoke('permissions:request'),
   permissionsContinue: () => ipcRenderer.send('permissions:continue'),
   clearSessionDirectives: () => ipcRenderer.invoke('session:directive-clear'),
+  dossierExtract: (jdText) => ipcRenderer.invoke('dossier:extract', jdText),
+  dossierResearch: (params) => ipcRenderer.invoke('dossier:research', params),
+  dossierGet: () => ipcRenderer.invoke('dossier:get'),
+  dossierRefresh: (company) => ipcRenderer.invoke('dossier:refresh', company),
+  dossierClear: () => ipcRenderer.invoke('dossier:clear'),
+  autoAnswerGetLog: () => ipcRenderer.invoke('autoanswer:log'),
+  autoAnswerConfirm: (questionText) => ipcRenderer.invoke('autoanswer:confirm', questionText),
+  autoAnswerDismiss: (questionText) => ipcRenderer.invoke('autoanswer:dismiss', questionText),
+  companionPairArm: () => ipcRenderer.invoke('companion:pair-arm'),
+  companionStatus: () => ipcRenderer.invoke('companion:status'),
+  companionTriggerCapture: () => ipcRenderer.invoke('companion:trigger-capture'),
+  tracerSnapshot: () => ipcRenderer.invoke('tracer:snapshot'),
   log: (msg) => ipcRenderer.send('log', msg),
   on: (channel, cb) => {
     const allowed = [
@@ -73,9 +85,11 @@ contextBridge.exposeInMainWorld('cue', {
       'stealth-key', 'toggle-ask-input', 'open-settings', 'settings-unlock',
       'reset-view', 'response:scroll', 'code:scroll', 'history:nav',
       'transparency:toggle', 'interactive:state', 'attached-files', 'emergency:recover',
-      'settings:changed',
+      'settings:changed', 'autoanswer:offer',
       'open-meeting-companion', 'session:directive',
-      'antigravity:status', 'codex:status'
+      'antigravity:status', 'codex:status', 'dossier:updated',
+      'companion:captured', 'companion:consumed', 'companion:status',
+      'claim:verified'
     ];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, data) => cb(data));

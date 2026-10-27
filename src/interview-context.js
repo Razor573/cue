@@ -4,6 +4,8 @@
 // category is in play and injects only the fields that are relevant.
 
 // ── Question category detection ───────────────────────────────────────────────
+const { formatDossierForPrompt } = require('./company-dossier');
+
 const CATEGORY_PATTERNS = {
   behavioral: [
     /tell me about a time/i, /give me an example/i, /describe a situation/i,
@@ -165,7 +167,7 @@ function buildJDBlock(jd, limit = 600) {
  * Returns a system-prompt string with only the context fields relevant to
  * the detected interview category. Returns null for leetcode mode.
  */
-function buildInterviewContext(settings, mode, transcript) {
+function buildInterviewContext(settings, mode, transcript, browserContext) {
   // Coding problems never need personal context
   if (mode === 'leetcode') return null;
 
@@ -186,6 +188,15 @@ function buildInterviewContext(settings, mode, transcript) {
 
   const blocks = [];
 
+  // Browser context injection (from Companion extension)
+  if (browserContext && browserContext.text) {
+    blocks.push(
+      '=== Captured Browser Context ===\n' +
+      'Title: ' + (browserContext.title || 'Web Page') + '\n' +
+      browserContext.text
+    );
+  }
+
   // Always include resume if available (but size varies by category)
   if (hasResume) {
     const resumeLimit = (category === 'behavioral' || category === 'experience') ? 2400 : 1400;
@@ -199,6 +210,12 @@ function buildInterviewContext(settings, mode, transcript) {
   }
 
   // Category-specific injections
+  // Company dossier injection
+  if (settings.currentDossier && settings.currentDossier.company) {
+    const formattedDossier = formatDossierForPrompt(settings.currentDossier);
+    if (formattedDossier) blocks.push(formattedDossier);
+  }
+
   switch (category) {
 
     case 'behavioral':

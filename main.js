@@ -14,6 +14,13 @@ const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
 const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
 const { buildInterviewContext, detectCategory } = require('./src/interview-context');
+const { extractCompanyFromJD, generateCompanyDossier } = require('./src/company-dossier');
+const { createSimpleAutoAnswer, buildJudgePrompt } = require('./src/auto-answer');
+const { createCompanionServer } = require('./src/companion-server');
+let companionServer = null;
+const { resolveFollowUp } = require('./src/followup-resolver');
+const { verifyClaims } = require('./src/claim-verifier');
+const { globalTracer } = require('./src/latency-tracer');
 const { startAppLink, stopAppLink, recordEvent, appLinkConsentState, revokeAppLinkCaller } = require('./src/applink');
 const publik = require('./src/publik');
 // The app token release.yml baked into src/publik-build.json (empty in a dev
@@ -124,6 +131,39 @@ const buffers = { you: [], them: [] };
 const transcript = []; // { channel, text, ts } — capped at MAX_TRANSCRIPT_TURNS
 const MAX_TRANSCRIPT_TURNS = 200; // ~30–40 minutes of conversation at normal pace
 let meetingMemory = null; // persists the transcript per meeting + notes; see src/meeting-memory.js
+let autoAnswer = null;
+
+function initAutoAnswer() {
+  autoAnswer = createSimpleAutoAnswer({
+    isEnabled: () => {
+      const s = store.getSettings();
+      return !!(s && s.autoAnswer);
+    },
+    isCapturing: () => state.capturing,
+    isBusy: () => state.busy,
+    recentTurns: () => transcript.slice(-8),
+    judgeCandidate: async ({ candidateText, recentTurns }, signal) => {
+      const settings = store.getSettings();
+      const llm = createLLM({ ...settings, smart: false });
+      if (!llm || !llm.ready) return null;
+      const prompt = buildJudgePrompt({ candidateText, recentTurns });
+      return await llm.stream({
+        system: 'You are a fast, precise judge of whether spoken meeting audio contains a question directed at the user.',
+        turns: [{ role: 'user', text: prompt }],
+        maxTokens: 150,
+        signal,
+        onToken: () => {}
+      });
+    },
+    onDispatch: (questionText) => {
+      runFeature('say', questionText);
+    },
+    onOffer: (questionText) => {
+      send('autoanswer:offer', { questionText });
+    }
+  });
+}
+initAutoAnswer();
 let restoredTurns = []; // turns of an interrupted meeting resumed at launch, replayed to the renderer once
 // -------- slides state (memory-only, never written to disk) --------
 let slideStore = createSlideStore({ maxSlides: 50 });
@@ -153,15 +193,27 @@ const vad = {
     onsetThreshold: 220,
     offsetThreshold: 130,
     silenceFrames: 18,       // ~540ms silence before end
-    onSpeechStart: () => send('vad:state', { channel: 'you', speaking: true }),
-    onSpeechEnd: (dur) => send('vad:state', { channel: 'you', speaking: false, durationMs: dur })
+    onSpeechStart: () => {
+      send('vad:state', { channel: 'you', speaking: true });
+      if (autoAnswer) autoAnswer.onVadState('you', true);
+    },
+    onSpeechEnd: (dur) => {
+      send('vad:state', { channel: 'you', speaking: false, durationMs: dur });
+      if (autoAnswer) autoAnswer.onVadState('you', false);
+    }
   }),
   them: new AdaptiveVAD({
     onsetThreshold: 200,
     offsetThreshold: 120,
     silenceFrames: 20,       // ~600ms for remote audio (more forgiving)
-    onSpeechStart: () => send('vad:state', { channel: 'them', speaking: true }),
-    onSpeechEnd: (dur) => send('vad:state', { channel: 'them', speaking: false, durationMs: dur })
+    onSpeechStart: () => {
+      send('vad:state', { channel: 'them', speaking: true });
+      if (autoAnswer) autoAnswer.onVadState('them', true);
+    },
+    onSpeechEnd: (dur) => {
+      send('vad:state', { channel: 'them', speaking: false, durationMs: dur });
+      if (autoAnswer) autoAnswer.onVadState('them', false);
+    }
   })
 };
 // Pre-speech ring buffers (300ms) so we never clip the start of a word
@@ -239,6 +291,13 @@ function publishTranscript(channel, text) {
   if (!pushTranscript(turn)) return;
   send('transcript', turn);
   send('stt:final', { channel, text: turn.text });
+  if (autoAnswer) {
+    if (channel === 'them') {
+      autoAnswer.onThemFinal(turn.text);
+    } else if (channel === 'you') {
+      autoAnswer.onYouFinal(turn.text);
+    }
+  }
 }
 
 async function startLocalWhisper(settings) {
@@ -521,12 +580,22 @@ function initStreamingSTT() {
         if (pushTranscript(turn)) {
           send('transcript', turn);
           send('stt:final', { channel: ch, text });
+          if (autoAnswer) {
+            if (ch === 'them') {
+              autoAnswer.onThemFinal(turn.text);
+            } else if (ch === 'you') {
+              autoAnswer.onYouFinal(turn.text);
+            }
+          }
         }
       },
       onInterim: (ch, text) => {
         if (instance && streamingSTT[ch] !== instance) return;
         if (ch === 'you' && (Date.now() - crossTalkState.themLastActiveTs < 1000)) return;
         send('stt:interim', { channel: ch, text });
+        if (ch === 'them' && autoAnswer) {
+          autoAnswer.onThemInterim(text);
+        }
       },
       onError: (err) => {
         // A socket torn down by a quick stop/start can still report an error a
@@ -854,6 +923,9 @@ function abortActiveFeature() {
     activeFeatureAbort.abort();
     activeFeatureAbort = null;
   }
+  if (autoAnswer) {
+    autoAnswer.cancel();
+  }
   if (state.busy) {
     state.busy = false;
     send('llm:done', { aborted: true });
@@ -878,6 +950,18 @@ async function runFeature(mode, userText) {
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
+    const trace = settings.latencyTracer !== false
+      ? globalTracer.startTrace({ provider: settings.provider, model: llm.model || '' })
+      : null;
+    if (trace) trace.mark('question_submitted');
+
+    let effectiveUserText = userText || '';
+    if (settings.followupResolver !== false && transcript.length > 0 && typeof userText === 'string' && userText.trim()) {
+      const followUp = resolveFollowUp(userText, transcript);
+      if (followUp && followUp.modified) {
+        effectiveUserText = followUp.resolved;
+      }
+    }
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
@@ -928,7 +1012,11 @@ async function runFeature(mode, userText) {
     }
 
     let imageDataUrl = null;
-    if (def.needsScreen) {
+    const companionContext = companionServer ? companionServer.consumeCapturedContext() : null;
+    if (companionContext) {
+      send('companion:consumed', { title: companionContext.title });
+    }
+    if (def.needsScreen && !companionContext) {
       try {
         imageDataUrl = await captureScreenshot();
         if (!imageDataUrl) throw new Error('No screen source was available.');
@@ -957,7 +1045,7 @@ async function runFeature(mode, userText) {
     }
 
     const settingsForPrompt = store.getSettings();
-    let contextBlock = buildInterviewContext(settingsForPrompt, mode, transcript);
+    let contextBlock = buildInterviewContext(settingsForPrompt, mode, transcript, companionContext);
     const activeInstructions = [
       settingsForPrompt.sessionInstructions?.trim(),
       ...sessionDirectives
@@ -984,10 +1072,14 @@ async function runFeature(mode, userText) {
     if (priorityOverrideBlock) {
       system = system + priorityOverrideBlock;
     }
-    let built = def.build({ transcript, userText: userText || '' });
+    let built = def.build({ transcript, userText: effectiveUserText });
+    if (companionContext) {
+      built = `=== Captured Browser Context ===\nTitle: ${companionContext.title}\n${companionContext.text}\n\n` + built;
+    }
     if (activeInstructions.length > 0) {
       built = `[ACTIVE SESSION DIRECTIVES: ${activeInstructions.join(' | ')}]\n\n` + built;
     }
+    if (trace) trace.mark('context_built');
 
     // Watchdog: a provider that stalls mid-stream would otherwise hang the await forever,
     // leaving state.busy = true and wedging every later question until an app restart.
@@ -1000,6 +1092,11 @@ async function runFeature(mode, userText) {
       };
       rearm();
     });
+    let firstChunkSeen = false;
+    let firstUsefulTokenSeen = false;
+    let fullAnswerText = '';
+    let totalTokens = 0;
+    if (trace) trace.mark('provider_request_started', { provider: settings.provider, model: llm.model || '' });
     try {
       await Promise.race([
         llm.stream({
@@ -1009,6 +1106,10 @@ async function runFeature(mode, userText) {
           signal: currentAbort.signal,
           onThought: (thoughtText) => {
             if (streamSettled || currentAbort.signal.aborted) return;
+            if (trace && !firstChunkSeen) {
+              firstChunkSeen = true;
+              trace.mark('first_chunk');
+            }
             rearm();
             // Empty thoughts are the Vertex keep-alive (see src/vertex-ai.js):
             // they rearm the watchdog but must never reach the UI.
@@ -1016,6 +1117,16 @@ async function runFeature(mode, userText) {
           },
           onToken: (t) => {
             if (streamSettled || currentAbort.signal.aborted) return;
+            if (trace && !firstChunkSeen) {
+              firstChunkSeen = true;
+              trace.mark('first_chunk');
+            }
+            if (trace && !firstUsefulTokenSeen && t && t.trim()) {
+              firstUsefulTokenSeen = true;
+              trace.mark('first_useful_token');
+            }
+            totalTokens++;
+            fullAnswerText += t;
             rearm();
             send('llm:token', { text: t });
           },
@@ -1027,8 +1138,35 @@ async function runFeature(mode, userText) {
       streamSettled = true;
       clearTimeout(watchdog);
     }
+    if (trace) {
+      trace.mark('response_completed', { tokenCount: totalTokens });
+      trace.finish();
+    }
     if (!currentAbort.signal.aborted) {
       send('llm:done', {});
+    }
+    if (settings.claimValidator && !currentAbort.signal.aborted && fullAnswerText.trim()) {
+      if (trace) trace.mark('validation_started');
+      const profile = {
+        resumeText: settings.resumeText || '',
+        starStories: settings.starStories || '',
+        jobDescription: settings.jobDescription || '',
+        currentDossier: settings.currentDossier || null
+      };
+      const fastLLM = createLLM({ ...settings, smart: false });
+      verifyClaims({
+        answerText: fullAnswerText,
+        profile,
+        fastLLM,
+        timeoutMs: imageDataUrl ? 6000 : 3500,
+        enabled: true
+      }).then((claimResult) => {
+        if (trace) trace.mark('validation_completed');
+        send('claim:verified', claimResult);
+      }).catch((err) => {
+        if (trace) trace.mark('validation_completed');
+        console.warn('[cue] claim verification error:', err && err.message);
+      });
     }
     // Streams settle after their headers, so the charge is reconciled from
     // GET /wallet shortly after the answer — one request per answer, debounced.
@@ -1080,6 +1218,12 @@ ipcMain.handle('session:directive-clear', () => {
 });
 ipcMain.handle('settings:set', (_e, patch) => {
   sttDisabled = false;
+  if (patch && patch.jobDescription !== undefined && !String(patch.jobDescription).trim()) {
+    if (store.getSettings().currentDossier) {
+      patch.currentDossier = null;
+      send('dossier:updated', null);
+    }
+  }
   const next = store.setSettings(store.stripRendererPatch(patch));
   // Restart slide polling with the new interval when capturing (keeps slides).
   if (state.capturing) startSlideLoop();
@@ -1122,6 +1266,110 @@ ipcMain.handle('codex:logout', () => {
   const status = signOutCodex();
   send('codex:status', status);
   return { ok: true, ...status };
+});
+
+// -------- company dossier IPC --------
+ipcMain.handle('dossier:extract', (_e, jdText) => {
+  return extractCompanyFromJD(jdText);
+});
+
+ipcMain.handle('dossier:research', async (_e, { company, jdText } = {}) => {
+  let targetCompany = company;
+  if (!targetCompany && jdText) {
+    const extracted = extractCompanyFromJD(jdText);
+    targetCompany = extracted.company;
+  }
+  if (!targetCompany) {
+    throw new Error('No company identified to research.');
+  }
+  const s = store.getSettings();
+  const dossier = await generateCompanyDossier({
+    companyName: targetCompany,
+    jdText: jdText || s.jobDescription || '',
+    settings: s,
+    meetingsStore: meetingMemory ? meetingMemory.store : null,
+    llmFactory: (researchSettings) => createLLM(researchSettings)
+  });
+
+  const existingDossiers = s.companyDossiers || {};
+  store.setSettings({
+    companyDossiers: { ...existingDossiers, [targetCompany]: dossier },
+    currentDossier: dossier
+  });
+  send('dossier:updated', dossier);
+  return dossier;
+});
+
+ipcMain.handle('dossier:get', () => {
+  return store.getSettings().currentDossier || null;
+});
+
+ipcMain.handle('dossier:refresh', async (_e, company) => {
+  const s = store.getSettings();
+  const target = company || (s.currentDossier && s.currentDossier.company);
+  if (!target) throw new Error('No company to refresh.');
+  const dossier = await generateCompanyDossier({
+    companyName: target,
+    jdText: s.jobDescription || '',
+    settings: s,
+    meetingsStore: meetingMemory ? meetingMemory.store : null,
+    llmFactory: (researchSettings) => createLLM(researchSettings)
+  });
+  const existingDossiers = s.companyDossiers || {};
+  store.setSettings({
+    companyDossiers: { ...existingDossiers, [target]: dossier },
+    currentDossier: dossier
+  });
+  send('dossier:updated', dossier);
+  return dossier;
+});
+
+ipcMain.handle('dossier:clear', () => {
+  store.setSettings({ currentDossier: null });
+  send('dossier:updated', null);
+  return { ok: true };
+});
+
+ipcMain.handle('autoanswer:log', () => {
+  return autoAnswer ? autoAnswer.getDecisionLog() : [];
+});
+
+ipcMain.handle('autoanswer:confirm', (_e, questionText) => {
+  if (autoAnswer && typeof autoAnswer.recordConfirmation === 'function') {
+    autoAnswer.recordConfirmation(questionText);
+  }
+  return runFeature('say', questionText);
+});
+
+ipcMain.handle('autoanswer:dismiss', (_e, questionText) => {
+  if (autoAnswer && typeof autoAnswer.recordDismissal === 'function') {
+    autoAnswer.recordDismissal(questionText);
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('companion:pair-arm', () => {
+  if (!companionServer) return { ok: false, error: 'Companion server not running' };
+  const expiresAt = companionServer.armPairingWindow(60000);
+  return { ok: true, expiresAt };
+});
+
+ipcMain.handle('companion:status', () => {
+  if (!companionServer) return { paired: false, port: null, lastCapturedTitle: null };
+  return {
+    paired: companionServer.isPaired(),
+    port: companionServer.getPort(),
+    lastCapturedTitle: companionServer.getLastCapturedTitle()
+  };
+});
+
+ipcMain.handle('companion:trigger-capture', () => {
+  if (!companionServer) return { ok: false, error: 'Companion server not running' };
+  return companionServer.requestDesktopCapture();
+});
+
+ipcMain.handle('tracer:snapshot', () => {
+  return globalTracer.snapshot();
 });
 
 // -------- publik API --------
@@ -2195,6 +2443,18 @@ function launchApp() {
 
   createWindow();
   registerShortcuts();
+
+  if (!companionServer) {
+    companionServer = createCompanionServer({
+      isSessionActive: () => Boolean(state.capturing || (win && win.isVisible())),
+      onCaptured: ({ title, text, url }) => {
+        send('companion:captured', { title, text, url });
+      }
+    });
+    companionServer.start().catch((err) => {
+      console.warn('[cue] companion server start error:', err.message);
+    });
+  }
 }
 
 // -------- lifecycle --------
@@ -2243,6 +2503,9 @@ app.on('will-quit', () => {
   // Delaying shutdown to tidy a directory would be the wrong trade.
   stopAppLink();
   stopSlideLoop();
+  if (companionServer) {
+    companionServer.stop().catch(() => {});
+  }
   if (whisperModelManager?.activeDownload) {
     whisperModelManager.cancelDownload(whisperModelManager.activeDownload.modelId);
   }
