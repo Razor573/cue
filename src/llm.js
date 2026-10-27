@@ -9,6 +9,16 @@ const {
   listVertexModels,
   streamVertexGenerateContent
 } = require('./vertex-ai');
+const {
+  getAntigravityStatus,
+  listAntigravityModels,
+  streamAntigravity
+} = require('./antigravity');
+const {
+  CODEX_MODEL_OPTIONS,
+  getCodexStatus,
+  streamCodexResponses
+} = require('./codex');
 
 const CUSTOM_PROVIDER = 'custom';
 const PUBLIK_PROVIDER = publik.PUBLIK_PROVIDER;
@@ -89,6 +99,8 @@ const DEFAULT_MODELS = {
   anthropic: CURRENT_ANTHROPIC_DEFAULT_FAST,
   gemini: CURRENT_GEMINI_DEFAULT,
   vertex: { fast: 'gemini-3.8-flash', smart: 'gemini-4-argon' },
+  antigravity: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-high' },
+  codex: { fast: 'gpt-5.5', smart: 'gpt-5.5-codex' },
   ollama: 'llama3.2',
   groq: 'llama-3.1-8b-instant',
   minimax: 'MiniMax-M2.7',
@@ -139,6 +151,37 @@ const PROVIDER_MODEL_CATALOG = {
     [
       ...VERTEX_MODEL_OPTIONS.filter((m) => m.tier === 'smart'),
       ...VERTEX_MODEL_OPTIONS.filter((m) => m.tier === 'fast')
+    ]
+  ),
+  antigravity: buildCatalogEntry(
+    [
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Default)' },
+      { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' },
+      { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' }
+    ],
+    [
+      { id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro High (Default)' },
+      { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+      { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' }
+    ]
+  ),
+  codex: buildCatalogEntry(
+    [
+      { id: 'gpt-5.5', label: 'gpt-5.5 (Default)' },
+      { id: 'gpt-5.5-codex', label: 'gpt-5.5-codex' },
+      { id: 'gpt-5.4-codex', label: 'gpt-5.4-codex' },
+      { id: 'gpt-5.2-codex', label: 'gpt-5.2-codex' },
+      { id: 'gpt-5.2', label: 'gpt-5.2' },
+      { id: 'gpt-5.1-codex', label: 'gpt-5.1-codex' }
+    ],
+    [
+      { id: 'gpt-5.5-codex', label: 'gpt-5.5-codex (Default)' },
+      { id: 'gpt-5.4-codex', label: 'gpt-5.4-codex' },
+      { id: 'gpt-5.5', label: 'gpt-5.5' },
+      { id: 'gpt-5.2-codex', label: 'gpt-5.2-codex' },
+      { id: 'gpt-5.2', label: 'gpt-5.2' },
+      { id: 'gpt-5.1-codex', label: 'gpt-5.1-codex' }
     ]
   ),
   gemini: buildCatalogEntry(
@@ -296,7 +339,9 @@ const PROVIDER_LABELS = {
   minimax: 'MiniMax',
   publik: publik.PROVIDER_LABEL,
   deepseek: 'DeepSeek',
-  vertex: 'Vertex AI'
+  vertex: 'Vertex AI',
+  antigravity: 'Antigravity',
+  codex: 'Codex'
 };
 
 // DeepSeek is OpenAI-compatible and reuses the OpenAI screenshot/streaming path via baseURL.
@@ -414,6 +459,22 @@ function formatProviderErrorMessage(error, provider, model) {
   if (provider === PUBLIK_PROVIDER) {
     const described = describePublikError(error, model);
     if (described) return described;
+  }
+
+  if (provider === 'codex') {
+    const status = error && (error.status || error.statusCode || error.response?.status);
+    if (status === 429 || (error && error.code === 'plan_limit') || /chatgpt plan limit|usage_limit|rate_limit/i.test(rawMessage)) {
+      return /chatgpt plan limit/i.test(rawMessage)
+        ? rawMessage
+        : 'ChatGPT plan limit reached (429). Please wait for your ChatGPT subscription window to reset or switch providers.';
+    }
+    if (/session expired/i.test(rawMessage)) {
+      return rawMessage;
+    }
+  }
+
+  if (provider === 'antigravity' && /session expired/i.test(rawMessage)) {
+    return rawMessage;
   }
 
   if (isQuotaError(error)) {
@@ -810,6 +871,16 @@ function createLLM(settings, fetchImpl = fetch) {
     if (!configurationError && !effectiveProject && !apiKey) {
       configurationError = 'Add your Vertex AI GCP Project ID or paste a Service Account JSON key in Settings.';
     }
+  } else if (provider === 'antigravity') {
+    const status = getAntigravityStatus(settings.oauthStorageOptions);
+    if (!status.authenticated) {
+      configurationError = 'Sign in with Google in Settings to use Antigravity.';
+    }
+  } else if (provider === 'codex') {
+    const status = getCodexStatus(settings.oauthStorageOptions);
+    if (!status.authenticated) {
+      configurationError = 'Sign in with ChatGPT in Settings to use Codex.';
+    }
   } else if (provider !== 'ollama' && !apiKey) {
     // Ollama is a local server: the field holds a URL, and no key is required.
     configurationError = `Add your ${provider} API key in Settings.`;
@@ -850,6 +921,47 @@ function createLLM(settings, fetchImpl = fetch) {
               thinkingLevel: settings.vertexThinkingLevel || (settings.smart ? 'HIGH' : 'LOW'),
               webSearch: !!settings.vertexWebSearch,
               includeThoughts: true,
+              signal: args.signal,
+              onToken: args.onToken,
+              onThought: args.onThought
+            },
+            fetchImpl
+          );
+          return res.fullText;
+        }
+        if (provider === 'antigravity') {
+          const res = await streamAntigravity(
+            {
+              thinkingLevel: settings.antigravityThinkingLevel || (settings.smart ? 'HIGH' : 'LOW'),
+              googleSearch: !!settings.geminiWebSearch,
+              oauthStorageOptions: settings.oauthStorageOptions
+            },
+            {
+              model,
+              system: args.system,
+              turns: args.turns,
+              imageDataUrl: args.imageDataUrl,
+              maxTokens: args.maxTokens,
+              signal: args.signal,
+              onToken: args.onToken,
+              onThought: args.onThought
+            },
+            fetchImpl
+          );
+          return res.fullText;
+        }
+        if (provider === 'codex') {
+          const res = await streamCodexResponses(
+            {
+              reasoningEffort: settings.smart ? 'high' : 'low',
+              oauthStorageOptions: settings.oauthStorageOptions
+            },
+            {
+              model,
+              system: args.system,
+              turns: args.turns,
+              imageDataUrl: args.imageDataUrl,
+              maxTokens: args.maxTokens,
               signal: args.signal,
               onToken: args.onToken,
               onThought: args.onThought
@@ -941,6 +1053,17 @@ async function listProviderModels(settings = {}, override = {}, fetchImpl = fetc
         fetchImpl
       );
       liveModels = vertexRes.models || [];
+      live = true;
+    } else if (provider === 'antigravity') {
+      const ids = await listAntigravityModels(settings.oauthStorageOptions || {}, fetchImpl);
+      liveModels = ids.map((id) => ({ id, label: id, tier: /pro/i.test(id) ? 'smart' : 'fast' }));
+      live = true;
+    } else if (provider === 'codex') {
+      liveModels = CODEX_MODEL_OPTIONS.map((m) => ({
+        id: m.id,
+        label: m.label,
+        tier: /codex/i.test(m.id) ? 'smart' : 'fast'
+      }));
       live = true;
     } else if (provider === 'gemini' && effectiveKey) {
       const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(effectiveKey)}`);

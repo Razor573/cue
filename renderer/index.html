@@ -152,6 +152,8 @@
           <button data-provider="gemini">Gemini</button>
           <button data-provider="vertex" data-val="vertex">Vertex AI</button>
           <button data-provider="anthropic">Anthropic</button>
+          <button data-provider="antigravity">Antigravity</button>
+          <button data-provider="codex">Codex</button>
           <button data-provider="openai">OpenAI</button>
           <button data-provider="cerebras">Cerebras</button>
           <button data-provider="groq">Groq</button>
@@ -278,6 +280,38 @@
               <input id="vertex-web-search" type="checkbox" style="width:auto;" />
               Enable Google Search grounding
             </label>
+          </div>
+        </div>
+
+        <div id="antigravity-row" class="vertex-card hidden">
+          <div class="vertex-card-head">
+            <span class="vertex-card-title">Google Antigravity (OAuth)</span>
+            <span id="antigravity-auth-status" class="vertex-badge">Not signed in</span>
+          </div>
+          <div class="s-note">Sign in with your Google account to use Gemini 3.8 Flash and Gemini 3.1 Pro via Google Code Assist without an API key.</div>
+          <div class="vertex-sa-actions" style="margin-top:8px;">
+            <button id="antigravity-login-btn" type="button" class="s-action primary">Sign in with Google</button>
+            <button id="antigravity-logout-btn" type="button" class="s-action danger hidden">Sign out</button>
+          </div>
+          <div class="s-field" style="margin-top:8px;">
+            <span>Thinking</span>
+            <div class="s-seg" id="antigravity-thinking" style="flex:1;">
+              <button type="button" data-thinking="LOW" class="on">Low</button>
+              <button type="button" data-thinking="MEDIUM">Medium</button>
+              <button type="button" data-thinking="HIGH">High</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="codex-row" class="vertex-card hidden">
+          <div class="vertex-card-head">
+            <span class="vertex-card-title">OpenAI Codex (ChatGPT OAuth)</span>
+            <span id="codex-auth-status" class="vertex-badge">Not signed in</span>
+          </div>
+          <div class="s-note">Sign in with your ChatGPT Plus, Pro, or Team account to use GPT-5.5 and GPT-5.5 Codex without an API key. Usage counts against your ChatGPT plan quota.</div>
+          <div class="vertex-sa-actions" style="margin-top:8px;">
+            <button id="codex-login-btn" type="button" class="s-action primary">Sign in with ChatGPT</button>
+            <button id="codex-logout-btn" type="button" class="s-action danger hidden">Sign out</button>
           </div>
         </div>
 

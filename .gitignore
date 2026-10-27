@@ -18,6 +18,10 @@ native/systemaudio
 # User data / secrets — NEVER commit these
 # Contains API keys and personal interview prep.
 cue-data.json
+*.enc
+*oauth*.json
+*token*.json
+cue-oauth*
 *.env
 .env*
 

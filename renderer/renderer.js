@@ -259,8 +259,9 @@
     let thinking = '';
     if (provider === 'vertex') thinking = settings.vertexThinkingLevel || 'LOW';
     else if (provider === 'gemini') thinking = settings.geminiThinkingLevel || 'LOW';
+    else if (provider === 'antigravity') thinking = settings.antigravityThinkingLevel || 'LOW';
     const label = (s) => s.charAt(0) + s.slice(1).toLowerCase();
-    const providerName = provider === 'vertex' ? 'Vertex' : provider === 'gemini' ? 'Gemini' : provider;
+    const providerName = provider === 'vertex' ? 'Vertex' : provider === 'gemini' ? 'Gemini' : provider === 'antigravity' ? 'Antigravity' : provider === 'codex' ? 'Codex' : provider;
     const parts = [providerName, model, thinking ? label(thinking) : ''].filter(Boolean);
     btn.textContent = parts.join(' · ');
     btn.title = 'Settings (Ctrl+Shift+Alt+Left/Right switches provider, Ctrl+Shift+Alt+T cycles thinking)';
@@ -1916,6 +1917,10 @@
     if (vertexRow) vertexRow.classList.toggle('hidden', provider !== 'vertex');
     const geminiRow = $('#gemini-row');
     if (geminiRow) geminiRow.classList.toggle('hidden', provider !== 'gemini');
+    const antigravityRow = $('#antigravity-row');
+    if (antigravityRow) antigravityRow.classList.toggle('hidden', provider !== 'antigravity');
+    const codexRow = $('#codex-row');
+    if (codexRow) codexRow.classList.toggle('hidden', provider !== 'codex');
     renderPublikBlock();
   }
 
@@ -1955,7 +1960,12 @@
       const raw = vertexSaInput.value.trim();
       const badge = $('#vertex-sa-status');
       if (!raw) {
-        updateVertexStatusBadge();
+        document.querySelectorAll('#antigravity-thinking button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.thinking === (settings.antigravityThinkingLevel || 'LOW'));
+    });
+    renderAntigravityAuthStatus(settings.antigravityStatus);
+    renderCodexAuthStatus(settings.codexStatus);
+    updateVertexStatusBadge();
         return;
       }
       vertexKeyCleared = false;
@@ -1985,7 +1995,12 @@
       if ($('#vertex-sa-json')) $('#vertex-sa-json').value = '';
       if (settings && settings.apiKeys) settings.apiKeys.vertex = '';
       if (settings) settings.vertexKeyEmail = '';
-      updateVertexStatusBadge();
+      document.querySelectorAll('#antigravity-thinking button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.thinking === (settings.antigravityThinkingLevel || 'LOW'));
+    });
+    renderAntigravityAuthStatus(settings.antigravityStatus);
+    renderCodexAuthStatus(settings.codexStatus);
+    updateVertexStatusBadge();
     });
   }
 
@@ -2003,6 +2018,138 @@
       settings.geminiThinkingLevel = btn.dataset.thinking || 'LOW';
       document.querySelectorAll('#gemini-thinking button').forEach((b) => b.classList.toggle('on', b === btn));
     });
+  });
+
+  document.querySelectorAll('#antigravity-thinking button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!settings) return;
+      settings.antigravityThinkingLevel = btn.dataset.thinking || 'LOW';
+      document.querySelectorAll('#antigravity-thinking button').forEach((b) => b.classList.toggle('on', b === btn));
+    });
+  });
+
+  function renderAntigravityAuthStatus(status) {
+    const badge = $('#antigravity-auth-status');
+    const loginBtn = $('#antigravity-login-btn');
+    const logoutBtn = $('#antigravity-logout-btn');
+    if (!badge) return;
+    const st = status || (settings && settings.antigravityStatus) || {};
+    const signedIn = Boolean(st.authenticated || st.signedIn);
+    badge.classList.remove('ok', 'warn');
+    if (signedIn) {
+      const detail = st.email || st.projectId || 'Connected';
+      badge.textContent = `Signed in · ${detail}`;
+      badge.classList.add('ok');
+    } else {
+      badge.textContent = 'Not signed in';
+    }
+    if (loginBtn) loginBtn.classList.toggle('hidden', signedIn);
+    if (logoutBtn) logoutBtn.classList.toggle('hidden', !signedIn);
+  }
+
+  function renderCodexAuthStatus(status) {
+    const badge = $('#codex-auth-status');
+    const loginBtn = $('#codex-login-btn');
+    const logoutBtn = $('#codex-logout-btn');
+    if (!badge) return;
+    const st = status || (settings && settings.codexStatus) || {};
+    const signedIn = Boolean(st.authenticated || st.signedIn);
+    badge.classList.remove('ok', 'warn');
+    if (signedIn) {
+      const detail = st.email || st.accountId || 'Connected';
+      badge.textContent = `Signed in · ${detail}`;
+      badge.classList.add('ok');
+    } else {
+      badge.textContent = 'Not signed in';
+    }
+    if (loginBtn) loginBtn.classList.toggle('hidden', signedIn);
+    if (logoutBtn) logoutBtn.classList.toggle('hidden', !signedIn);
+  }
+
+  const antigravityLoginBtn = $('#antigravity-login-btn');
+  if (antigravityLoginBtn) {
+    antigravityLoginBtn.addEventListener('click', async () => {
+      if (!cue.antigravityLogin) return;
+      antigravityLoginBtn.disabled = true;
+      const badge = $('#antigravity-auth-status');
+      if (badge) badge.textContent = 'Waiting for browser sign-in…';
+      try {
+        const res = await cue.antigravityLogin();
+        if (settings) settings.antigravityStatus = res;
+        renderAntigravityAuthStatus(res);
+        if (res && res.ok === false && res.error && badge) {
+          badge.textContent = res.error;
+          badge.classList.add('warn');
+        } else {
+          void refreshModelDropdowns(true);
+        }
+      } catch (err) {
+        if (badge) {
+          badge.textContent = (err && err.message) || 'Sign-in failed';
+          badge.classList.add('warn');
+        }
+      } finally {
+        antigravityLoginBtn.disabled = false;
+      }
+    });
+  }
+
+  const antigravityLogoutBtn = $('#antigravity-logout-btn');
+  if (antigravityLogoutBtn) {
+    antigravityLogoutBtn.addEventListener('click', async () => {
+      if (!cue.antigravityLogout) return;
+      const res = await cue.antigravityLogout();
+      if (settings) settings.antigravityStatus = res;
+      renderAntigravityAuthStatus(res);
+    });
+  }
+
+  const codexLoginBtn = $('#codex-login-btn');
+  if (codexLoginBtn) {
+    codexLoginBtn.addEventListener('click', async () => {
+      if (!cue.codexLogin) return;
+      codexLoginBtn.disabled = true;
+      const badge = $('#codex-auth-status');
+      if (badge) badge.textContent = 'Waiting for browser sign-in…';
+      try {
+        const res = await cue.codexLogin();
+        if (settings) settings.codexStatus = res;
+        renderCodexAuthStatus(res);
+        if (res && res.ok === false && res.error && badge) {
+          badge.textContent = res.error;
+          badge.classList.add('warn');
+        } else {
+          void refreshModelDropdowns(true);
+        }
+      } catch (err) {
+        if (badge) {
+          badge.textContent = (err && err.message) || 'Sign-in failed';
+          badge.classList.add('warn');
+        }
+      } finally {
+        codexLoginBtn.disabled = false;
+      }
+    });
+  }
+
+  const codexLogoutBtn = $('#codex-logout-btn');
+  if (codexLogoutBtn) {
+    codexLogoutBtn.addEventListener('click', async () => {
+      if (!cue.codexLogout) return;
+      const res = await cue.codexLogout();
+      if (settings) settings.codexStatus = res;
+      renderCodexAuthStatus(res);
+    });
+  }
+
+  cue.on('antigravity:status', (st) => {
+    if (settings) settings.antigravityStatus = st;
+    renderAntigravityAuthStatus(st);
+  });
+
+  cue.on('codex:status', (st) => {
+    if (settings) settings.codexStatus = st;
+    renderCodexAuthStatus(st);
   });
 
   function populateModelSelects(catalog, currentFast, currentSmart) {
@@ -2434,6 +2581,11 @@
     document.querySelectorAll('#gemini-thinking button').forEach((b) => {
       b.classList.toggle('on', b.dataset.thinking === (settings.geminiThinkingLevel || 'LOW'));
     });
+    document.querySelectorAll('#antigravity-thinking button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.thinking === (settings.antigravityThinkingLevel || 'LOW'));
+    });
+    renderAntigravityAuthStatus(settings.antigravityStatus);
+    renderCodexAuthStatus(settings.codexStatus);
     updateVertexStatusBadge();
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
@@ -2517,7 +2669,7 @@
 
   function statusText() {
     const k = settings.apiKeys;
-    const labels = { publik: 'publik API', vertex: 'Vertex AI', cerebras: 'Cerebras', openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', deepgram: 'Deepgram', custom: 'Custom', ollama: 'Ollama', groq: 'Groq', minimax: 'MiniMax', deepseek: 'DeepSeek', azure: 'Azure AI Foundry' };
+    const labels = { publik: 'publik API', vertex: 'Vertex AI', antigravity: 'Antigravity', codex: 'Codex', cerebras: 'Cerebras', openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', deepgram: 'Deepgram', custom: 'Custom', ollama: 'Ollama', groq: 'Groq', minimax: 'MiniMax', deepseek: 'DeepSeek', azure: 'Azure AI Foundry' };
     const has = Object.keys(labels).filter((p) => k[p]).map((p) => labels[p]);
     const publikPart = settings.provider === 'publik' && publikState
       ? ` · ${publikState.connected ? (publikState.balanceLabel ? `balance ${publikState.balanceLabel}` : 'connected') : 'not set up'}`
@@ -2803,7 +2955,12 @@
     // this, `settings.provider` stays on its default ('openai') forever and
     // cue keeps reporting itself unconfigured even though a valid key was
     // saved for the provider the user actually meant to use.
-    if (!settings.apiKeys[settings.provider] && !(settings.provider === 'vertex' && settings.vertexProject)) {
+    if (
+      !settings.apiKeys[settings.provider] &&
+      !(settings.provider === 'vertex' && settings.vertexProject) &&
+      settings.provider !== 'antigravity' &&
+      settings.provider !== 'codex'
+    ) {
       const keyedProviders = ['vertex', 'cerebras', 'openai', 'anthropic', 'gemini', 'groq', 'minimax', 'deepseek', 'azure'];
       const justFilled = keyedProviders.find((p) => settings.apiKeys[p]);
       if (justFilled) settings.provider = justFilled;

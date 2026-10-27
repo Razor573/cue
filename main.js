@@ -7,6 +7,8 @@ const { createSTT } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
 const { createLLM, listProviderModels, testProviderConnection, listGeminiSTTModels } = require('./src/llm');
 const { validateServiceAccountJson } = require('./src/vertex-ai');
+const { signInAntigravity, signOutAntigravity, getAntigravityStatus } = require('./src/antigravity');
+const { signInCodex, signOutCodex, getCodexStatus } = require('./src/codex');
 const { MODES } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
@@ -1051,7 +1053,11 @@ async function runFeature(mode, userText) {
 // -------- IPC --------
 // Redact on the way out, strip on the way in: the publik key never enters the
 // renderer, and the renderer's whole-object Save can never clobber it.
-ipcMain.handle('settings:get', () => store.redactForRenderer(store.getSettings()));
+ipcMain.handle('settings:get', () => ({
+  ...store.redactForRenderer(store.getSettings()),
+  antigravityStatus: getAntigravityStatus(),
+  codexStatus: getCodexStatus()
+}));
 ipcMain.handle('models:list', async (_e, params = {}) => listProviderModels(store.getSettings(), params || {}));
 ipcMain.handle('stt:gemini-models', async (_e, params = {}) => {
   const settings = store.getSettings();
@@ -1077,7 +1083,45 @@ ipcMain.handle('settings:set', (_e, patch) => {
   const next = store.setSettings(store.stripRendererPatch(patch));
   // Restart slide polling with the new interval when capturing (keeps slides).
   if (state.capturing) startSlideLoop();
-  return store.redactForRenderer(next);
+  return {
+    ...store.redactForRenderer(next),
+    antigravityStatus: getAntigravityStatus(),
+    codexStatus: getCodexStatus()
+  };
+});
+
+ipcMain.handle('antigravity:status', () => getAntigravityStatus());
+ipcMain.handle('antigravity:login', async () => {
+  try {
+    const status = await signInAntigravity();
+    send('antigravity:status', status);
+    return { ok: true, ...status };
+  } catch (err) {
+    const status = getAntigravityStatus();
+    return { ok: false, error: (err && err.message) || String(err), ...status };
+  }
+});
+ipcMain.handle('antigravity:logout', () => {
+  const status = signOutAntigravity();
+  send('antigravity:status', status);
+  return { ok: true, ...status };
+});
+
+ipcMain.handle('codex:status', () => getCodexStatus());
+ipcMain.handle('codex:login', async () => {
+  try {
+    const status = await signInCodex();
+    send('codex:status', status);
+    return { ok: true, ...status };
+  } catch (err) {
+    const status = getCodexStatus();
+    return { ok: false, error: (err && err.message) || String(err), ...status };
+  }
+});
+ipcMain.handle('codex:logout', () => {
+  const status = signOutCodex();
+  send('codex:status', status);
+  return { ok: true, ...status };
 });
 
 // -------- publik API --------
@@ -1633,12 +1677,14 @@ function registerVisibilityShortcuts() {
 // (LOW -> MEDIUM -> HIGH -> LOW). Both take effect on the next request: the
 // provider and thinking level are read fresh from settings per request.
 // The renderer refreshes its status pill via 'settings:changed'.
-const PROVIDER_CYCLE = ['gemini', 'vertex'];
+const PROVIDER_CYCLE = ['gemini', 'vertex', 'antigravity', 'codex'];
 const THINKING_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
 
 function providerLabel(provider) {
   if (provider === 'vertex') return 'Vertex';
   if (provider === 'gemini') return 'Gemini';
+  if (provider === 'antigravity') return 'Antigravity';
+  if (provider === 'codex') return 'Codex';
   return provider;
 }
 
@@ -1664,7 +1710,11 @@ function cycleThinkingLevel() {
   const settings = store.getSettings();
   // Vertex has its own level; everything else cycles the Gemini level (the
   // other half of the pair these hotkeys switch between).
-  const key = settings.provider === 'vertex' ? 'vertexThinkingLevel' : 'geminiThinkingLevel';
+  const key = settings.provider === 'vertex'
+    ? 'vertexThinkingLevel'
+    : settings.provider === 'antigravity'
+      ? 'antigravityThinkingLevel'
+      : 'geminiThinkingLevel';
   const cur = String(settings[key] || 'LOW').toUpperCase();
   const idx = THINKING_LEVELS.indexOf(cur);
   const next = THINKING_LEVELS[(idx + 1 + THINKING_LEVELS.length) % THINKING_LEVELS.length] || 'LOW';

@@ -9,6 +9,12 @@ contextBridge.exposeInMainWorld('cue', {
   listGeminiSTTModels: (params) => ipcRenderer.invoke('stt:gemini-models', params),
   testConnection: (params) => ipcRenderer.invoke('llm:test-connection', params),
   parseVertexServiceAccount: (raw) => ipcRenderer.invoke('vertex:parse-sa', raw),
+  antigravityStatus: () => ipcRenderer.invoke('antigravity:status'),
+  antigravityLogin: () => ipcRenderer.invoke('antigravity:login'),
+  antigravityLogout: () => ipcRenderer.invoke('antigravity:logout'),
+  codexStatus: () => ipcRenderer.invoke('codex:status'),
+  codexLogin: () => ipcRenderer.invoke('codex:login'),
+  codexLogout: () => ipcRenderer.invoke('codex:logout'),
   whisperModels: () => ipcRenderer.invoke('whisper:models'),
   whisperModelDownload: (modelId) => ipcRenderer.invoke('whisper:model-download', modelId),
   whisperModelCancel: (modelId) => ipcRenderer.invoke('whisper:model-cancel', modelId),
@@ -68,7 +74,8 @@ contextBridge.exposeInMainWorld('cue', {
       'reset-view', 'response:scroll', 'code:scroll', 'history:nav',
       'transparency:toggle', 'interactive:state', 'attached-files', 'emergency:recover',
       'settings:changed',
-      'open-meeting-companion', 'session:directive'
+      'open-meeting-companion', 'session:directive',
+      'antigravity:status', 'codex:status'
     ];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, data) => cb(data));

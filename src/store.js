@@ -46,6 +46,7 @@ const DEFAULTS = {
   vertexLocation: 'global',
   vertexThinkingLevel: 'LOW',
   vertexWebSearch: false,
+  antigravityThinkingLevel: 'LOW',
   geminiSttModel: 'gemini-3.5-transcribe',
   geminiSttFallbackModel: 'gemini-3.5-flash-lite',
   // publik API (packaged-build default). apiKeys.publik holds the minted key;
@@ -119,6 +120,8 @@ const DEFAULTS = {
     // 2026-03-03 and 404s on every request. smart is the newest Pro release.
     gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-preview' },
     vertex: { fast: 'gemini-3.8-flash', smart: 'gemini-4-argon' },
+    antigravity: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-high' },
+    codex: { fast: 'gpt-5.5', smart: 'gpt-5.5-codex' },
     custom: { fast: '', smart: '' },
     ollama: { fast: 'llama3.2', smart: 'llama3.3' },
     groq: { fast: 'llama-3.1-8b-instant', smart: 'llama-3.3-70b-versatile' },
@@ -200,8 +203,9 @@ function applyPublikDefault(build) {
   const hasOwnKey = !!(data.apiKeys && data.apiKeys[current]);
   const hasCustomEndpoint = current === 'custom' && !!data.baseUrl;
   const hasVertexProject = current === 'vertex' && !!data.vertexProject;
+  const hasOAuthProvider = current === 'antigravity' || current === 'codex';
   data.publik = { ...data.publik, defaultApplied: true };
-  if (hasOwnKey || hasCustomEndpoint || hasVertexProject) { save(); return false; }
+  if (hasOwnKey || hasCustomEndpoint || hasVertexProject || hasOAuthProvider) { save(); return false; }
   data.provider = 'publik';
   save();
   return true;
