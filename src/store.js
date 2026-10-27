@@ -19,8 +19,25 @@ const fileStore = createFileStore(() => (app ? app.getPath('userData') : require
 // should live in a real prompt file, not in a settings field.
 const MAX_AI_RULES_CHARS = 1000000;
 
+const DEFAULT_ROTATION_PROVIDERS = ['gemini', 'vertex', 'antigravity', 'codex'];
+
+function sanitizeRotationProviders(list, currentProvider) {
+  let cleaned = Array.isArray(list)
+    ? list.map((p) => (typeof p === 'string' ? p.trim() : '')).filter(Boolean)
+    : [];
+  cleaned = Array.from(new Set(cleaned));
+  if (cleaned.length === 0) {
+    cleaned = [...DEFAULT_ROTATION_PROVIDERS];
+  }
+  if (currentProvider && typeof currentProvider === 'string' && !cleaned.includes(currentProvider)) {
+    cleaned.push(currentProvider);
+  }
+  return cleaned;
+}
+
 const DEFAULTS = {
   provider: 'openai',
+  rotationProviders: ['gemini', 'vertex', 'antigravity', 'codex'],
   sttProvider: 'auto',
   localWhisper: {
     modelId: 'base.en',
@@ -168,9 +185,13 @@ function deepMerge(base, over) {
 }
 
 function load() {
-  if (data) return data;
+  if (data) {
+    data.rotationProviders = sanitizeRotationProviders(data.rotationProviders, data.provider);
+    return data;
+  }
   const loaded = fileStore.load();
   data = deepMerge(DEFAULTS, loaded ? loaded.data : {});
+  data.rotationProviders = sanitizeRotationProviders(data.rotationProviders, data.provider);
   if (loaded && loaded.recoveredFromBackup) save(); // best-effort heal so the corruption doesn't linger
   return data;
 }
@@ -207,6 +228,7 @@ function applyPublikDefault(build) {
   data.publik = { ...data.publik, defaultApplied: true };
   if (hasOwnKey || hasCustomEndpoint || hasVertexProject || hasOAuthProvider) { save(); return false; }
   data.provider = 'publik';
+  data.rotationProviders = sanitizeRotationProviders(data.rotationProviders, data.provider);
   save();
   return true;
 }
@@ -215,6 +237,11 @@ function stripRendererPatch(patch) {
   const out = { ...(patch || {}) };
   for (const k of RENDERER_READ_ONLY) delete out[k];
   if (out.apiKeys && typeof out.apiKeys === 'object') { out.apiKeys = { ...out.apiKeys }; delete out.apiKeys.publik; }
+  if (out.rotationProviders !== undefined && Array.isArray(out.rotationProviders)) {
+    out.rotationProviders = out.rotationProviders
+      .map((p) => (typeof p === 'string' ? p.trim() : ''))
+      .filter(Boolean);
+  }
   return out;
 }
 
@@ -252,7 +279,11 @@ module.exports = {
   applyPublikDefault,
   stripRendererPatch,
   redactForRenderer,
-  getSettings() { return load(); },
+  getSettings() {
+    const s = load();
+    s.rotationProviders = sanitizeRotationProviders(s.rotationProviders, s.provider);
+    return s;
+  },
   /** Null when the last save succeeded; the Error otherwise. */
   lastSaveError() { return lastError; },
   // Main-process only: the provisioning flow writes the key and its state here.
@@ -269,6 +300,7 @@ module.exports = {
     const nextSettings = deepMerge(data, patch || {});
     nextSettings.baseUrl = normalizeBaseUrl(nextSettings.baseUrl);
     nextSettings.opacity = clampOpacity(nextSettings.opacity);
+    nextSettings.rotationProviders = sanitizeRotationProviders(nextSettings.rotationProviders, nextSettings.provider);
     data = nextSettings;
     save();
     return data;

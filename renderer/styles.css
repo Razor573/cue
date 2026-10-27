@@ -690,6 +690,58 @@ button:focus { outline: none; }
   background: rgba(91, 138, 245, 0.20);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
+#provider-seg button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  position: relative;
+}
+
+.provider-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  font-size: 9px;
+  line-height: 1;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(0, 0, 0, 0.32);
+  color: transparent;
+  flex-shrink: 0;
+  transition: all 120ms ease;
+  user-select: none;
+  cursor: pointer;
+}
+
+.provider-tick:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+#provider-seg button.ticked .provider-tick {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+#provider-seg button.unticked {
+  opacity: 0.42;
+  filter: grayscale(0.5);
+}
+
+#provider-seg button.unticked:hover {
+  opacity: 0.72;
+  filter: grayscale(0.2);
+}
+
+#provider-seg button.unticked .provider-tick {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: transparent;
+}
 .s-field { display: flex; align-items: center; gap: 10px; }
 .s-field span { width: 84px; color: var(--tx-mut); font-size: 12px; flex-shrink: 0; }
 .s-field input, .s-input {

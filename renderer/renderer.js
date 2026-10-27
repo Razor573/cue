@@ -267,6 +267,33 @@
     btn.title = 'Settings (Ctrl+Shift+Alt+Left/Right switches provider, Ctrl+Shift+Alt+T cycles thinking)';
     btn.classList.add('provider-pill');
   }
+
+  const DEFAULT_ROTATION_PROVIDERS = ['gemini', 'vertex', 'antigravity', 'codex'];
+
+  function getRotationProviders() {
+    if (!settings) return [...DEFAULT_ROTATION_PROVIDERS];
+    if (!Array.isArray(settings.rotationProviders) || settings.rotationProviders.length === 0) {
+      settings.rotationProviders = [...DEFAULT_ROTATION_PROVIDERS];
+    }
+    return settings.rotationProviders;
+  }
+
+  function renderProviderTicks() {
+    const rotation = getRotationProviders();
+    document.querySelectorAll('#provider-seg button').forEach((b) => {
+      const prov = b.dataset.provider;
+      if (!prov) return;
+      const isTicked = rotation.includes(prov);
+      b.classList.toggle('ticked', isTicked);
+      b.classList.toggle('unticked', !isTicked);
+      b.classList.toggle('on', prov === (settings && settings.provider));
+      const tickEl = b.querySelector('.provider-tick');
+      if (tickEl) {
+        tickEl.textContent = isTicked ? '✓' : '';
+        tickEl.title = 'Toggle rotation inclusion';
+      }
+    });
+  }
   // Redacted view of the publik API state (never the key), from main via
   // cue.publikState() at boot and the publik:state push thereafter.
   let publikState = null;
@@ -2553,7 +2580,7 @@
 
   function fillSettings() {
     // Keys tab
-    document.querySelectorAll('#provider-seg button').forEach((b) => b.classList.toggle('on', b.dataset.provider === settings.provider));
+    renderProviderTicks();
     $('#key-cerebras').value = settings.apiKeys.cerebras || '';
     $('#key-openai').value = settings.apiKeys.openai || '';
     $('#key-anthropic').value = settings.apiKeys.anthropic || '';
@@ -2682,15 +2709,64 @@
     return `${labels[settings.provider] || settings.provider}${publikPart} · STT: ${stt}`;
   }
 
-  document.querySelectorAll('#provider-seg button').forEach((b) => b.addEventListener('click', () => {
-    settings.provider = b.dataset.provider;
-    document.querySelectorAll('#provider-seg button').forEach((x) => x.classList.toggle('on', x === b));
+  document.querySelectorAll('#provider-seg button').forEach((b) => b.addEventListener('click', async (e) => {
+    const provider = b.dataset.provider;
+    if (!provider) return;
+
+    // Check if the click was directly on or within the tick checkbox
+    const tickClicked = e.target.closest('.provider-tick');
+    if (tickClicked) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      let currentRotation = getRotationProviders().slice();
+      const isCurrentlyTicked = currentRotation.includes(provider);
+
+      if (isCurrentlyTicked) {
+        if (currentRotation.length <= 1) {
+          $('#s-status').textContent = 'At least one provider must remain ticked';
+          return;
+        }
+        currentRotation = currentRotation.filter((p) => p !== provider);
+        // If unticking the currently active provider, auto-switch settings.provider to the first available ticked provider
+        if (settings.provider === provider) {
+          settings.provider = currentRotation[0];
+        }
+      } else {
+        currentRotation.push(provider);
+      }
+
+      settings.rotationProviders = currentRotation;
+      settings = await cue.settingsSet(settings);
+      renderProviderTicks();
+      updateCustomProviderFields();
+      const m = settings.models[settings.provider] || { fast: '', smart: '' };
+      $('#model-fast').value = m.fast;
+      $('#model-smart').value = m.smart;
+      void refreshModelDropdowns(false);
+      $('#s-status').textContent = statusText();
+      updateSmartTooltip();
+      renderProviderPill();
+      return;
+    }
+
+    // Clicking the button body:
+    const rotation = getRotationProviders();
+    if (!rotation.includes(provider)) {
+      $('#s-status').textContent = 'Tick this provider first to enable and select it';
+      return;
+    }
+
+    settings.provider = provider;
+    renderProviderTicks();
     updateCustomProviderFields();
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
-    $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    $('#model-fast').value = m.fast;
+    $('#model-smart').value = m.smart;
     void refreshModelDropdowns(false);
     $('#s-status').textContent = statusText();
     updateSmartTooltip();
+    void saveSettings();
   }));
   document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.addEventListener('click', () => {
     settings.minimaxRegion = b.dataset.region;
@@ -2989,8 +3065,10 @@
     // Appearance tab
     const opacitySlider = $('#s-opacity-slider');
     if (opacitySlider) settings.opacity = clampOpacity(Number(opacitySlider.value) / 100);
+    settings.rotationProviders = getRotationProviders();
     try {
       settings = await cue.settingsSet(settings);
+      renderProviderTicks();
       renderProviderPill();
       $('#s-status').textContent = statusText();
       updateSmartTooltip();
@@ -3486,11 +3564,13 @@
     }
     renderAutoAnswerUi();
     renderProviderPill();
+    renderProviderTicks();
   });
 
   (async function boot() {
     settings = await cue.settingsGet();
     renderProviderPill();
+    renderProviderTicks();
     const platformInfo = await cue.platformInfo();
     publikState = await cue.publikState();
     // A build with no app token never shows the option, and keeps the BYO

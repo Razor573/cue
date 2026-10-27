@@ -146,23 +146,23 @@
 
       <!-- Tab: Keys -->
       <div class="s-body s-tab-pane" data-pane="keys">
-        <label class="s-label">Provider</label>
+        <label class="s-label">Provider <span class="s-hint">✓ = active in hotkey rotation (Ctrl+Shift+Alt+Left/Right) &amp; selectable</span></label>
         <div class="s-seg" id="provider-seg">
-          <button data-provider="publik" id="provider-publik" class="hidden">publik API <span class="s-default-badge">default</span></button>
-          <button data-provider="gemini">Gemini</button>
-          <button data-provider="vertex" data-val="vertex">Vertex AI</button>
-          <button data-provider="anthropic">Anthropic</button>
-          <button data-provider="antigravity">Antigravity</button>
-          <button data-provider="codex">Codex</button>
-          <button data-provider="openai">OpenAI</button>
-          <button data-provider="cerebras">Cerebras</button>
-          <button data-provider="groq">Groq</button>
-          <button data-provider="custom">Custom</button>
-          <button data-provider="ollama">Ollama</button>
-          <button data-provider="minimax">MiniMax</button>
-          <button data-provider="deepseek">DeepSeek</button>
-          <button data-provider="azure">Azure AI</button>
-        </div>
+  <button data-provider="publik" id="provider-publik" class="hidden">publik API <span class="provider-tick" data-tick-for="publik">✓</span><span class="s-default-badge">default</span></button>
+  <button data-provider="gemini">Gemini <span class="provider-tick" data-tick-for="gemini">✓</span></button>
+  <button data-provider="vertex" data-val="vertex">Vertex AI <span class="provider-tick" data-tick-for="vertex">✓</span></button>
+  <button data-provider="anthropic">Anthropic <span class="provider-tick" data-tick-for="anthropic" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="antigravity">Antigravity <span class="provider-tick" data-tick-for="antigravity" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="codex">Codex <span class="provider-tick" data-tick-for="codex" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="openai">OpenAI <span class="provider-tick" data-tick-for="openai" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="cerebras">Cerebras <span class="provider-tick" data-tick-for="cerebras" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="groq">Groq <span class="provider-tick" data-tick-for="groq" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="custom">Custom <span class="provider-tick" data-tick-for="custom" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="ollama">Ollama <span class="provider-tick" data-tick-for="ollama" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="minimax">MiniMax <span class="provider-tick" data-tick-for="minimax" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="deepseek">DeepSeek <span class="provider-tick" data-tick-for="deepseek" title="Toggle rotation inclusion">✓</span></button>
+  <button data-provider="azure">Azure AI <span class="provider-tick" data-tick-for="azure" title="Toggle rotation inclusion">✓</span></button>
+</div>
 
         <label class="s-label">API keys &amp; URLs <span class="s-hint">stored locally · never sent to any server</span></label>
         <div class="s-field" data-key-for="cerebras"><span>Cerebras</span><input id="key-cerebras" type="password" placeholder="csk-..." autocomplete="off" /></div>

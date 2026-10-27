@@ -1680,12 +1680,31 @@ function registerVisibilityShortcuts() {
 const PROVIDER_CYCLE = ['gemini', 'vertex', 'antigravity', 'codex'];
 const THINKING_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
 
+function getProviderCycle(settings) {
+  const configured = Array.isArray(settings?.rotationProviders)
+    ? settings.rotationProviders.map((p) => (typeof p === 'string' ? p.trim() : '')).filter(Boolean)
+    : [];
+  return configured.length > 0 ? configured : PROVIDER_CYCLE;
+}
+
 function providerLabel(provider) {
-  if (provider === 'vertex') return 'Vertex';
-  if (provider === 'gemini') return 'Gemini';
-  if (provider === 'antigravity') return 'Antigravity';
-  if (provider === 'codex') return 'Codex';
-  return provider;
+  const labels = {
+    gemini: 'Gemini',
+    vertex: 'Vertex AI',
+    antigravity: 'Antigravity',
+    codex: 'Codex',
+    anthropic: 'Anthropic',
+    openai: 'OpenAI',
+    cerebras: 'Cerebras',
+    groq: 'Groq',
+    custom: 'Custom',
+    ollama: 'Ollama',
+    minimax: 'MiniMax',
+    deepseek: 'DeepSeek',
+    azure: 'Azure AI',
+    publik: 'publik API'
+  };
+  return labels[provider] || provider;
 }
 
 function currentProviderModel(settings) {
@@ -1696,10 +1715,11 @@ function currentProviderModel(settings) {
 
 function cycleProvider(direction) {
   const settings = store.getSettings();
-  const idx = PROVIDER_CYCLE.indexOf(settings.provider);
+  const cycle = getProviderCycle(settings);
+  const idx = cycle.indexOf(settings.provider);
   const next = idx === -1
-    ? 'gemini'
-    : PROVIDER_CYCLE[(idx + direction + PROVIDER_CYCLE.length) % PROVIDER_CYCLE.length];
+    ? (cycle[0] || 'gemini')
+    : cycle[(idx + direction + cycle.length) % cycle.length];
   const updated = store.setSettings({ provider: next });
   const model = currentProviderModel(updated);
   send('settings:changed', { provider: next });
@@ -2233,3 +2253,12 @@ app.on('window-all-closed', (e) => {
   if (permWin) { e.preventDefault(); return; }
   app.quit();
 });
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    PROVIDER_CYCLE,
+    getProviderCycle,
+    providerLabel,
+    cycleProvider
+  };
+}

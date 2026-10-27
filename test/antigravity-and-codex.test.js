@@ -649,3 +649,46 @@ test('11. UI and hotkey wiring includes antigravity and codex', () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(mainSrc, /PROVIDER_CYCLE\s*=\s*\['gemini',\s*'vertex',\s*'antigravity',\s*'codex'\]/);
 });
+
+test('12. User-configurable provider rotation ticks in store and main cycle', () => {
+  const { DEFAULTS, getSettings, stripRendererPatch } = require('../src/store');
+  assert.deepEqual(DEFAULTS.rotationProviders, ['gemini', 'vertex', 'antigravity', 'codex']);
+
+  // getSettings ensures rotationProviders is an array and includes settings.provider
+  const current = getSettings();
+  assert.ok(Array.isArray(current.rotationProviders));
+  assert.ok(current.rotationProviders.includes(current.provider));
+
+  // stripRendererPatch allows rotationProviders to pass through
+  const patch = stripRendererPatch({ rotationProviders: ['gemini', 'openai'] });
+  assert.deepEqual(patch.rotationProviders, ['gemini', 'openai']);
+
+  // main.js getProviderCycle helper respects rotationProviders
+  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const vm = require('node:vm');
+  const getCycleFnMatch = mainSrc.match(/function getProviderCycle\(settings\) \{[\s\S]*?\n\}/);
+  assert.ok(getCycleFnMatch, 'getProviderCycle must be defined in main.js');
+  const sandbox = { PROVIDER_CYCLE: ['gemini', 'vertex', 'antigravity', 'codex'] };
+  vm.createContext(sandbox);
+  vm.runInContext(`${getCycleFnMatch[0]}\nglobalThis.getProviderCycle = getProviderCycle;`, sandbox);
+  const getProviderCycle = sandbox.getProviderCycle;
+
+  // Custom ticked providers
+  assert.deepEqual(
+    getProviderCycle({ rotationProviders: ['anthropic', 'openai'] }),
+    ['anthropic', 'openai']
+  );
+  // Falls back to PROVIDER_CYCLE when missing or empty
+  assert.deepEqual(
+    getProviderCycle({ rotationProviders: [] }),
+    ['gemini', 'vertex', 'antigravity', 'codex']
+  );
+  assert.deepEqual(
+    getProviderCycle({}),
+    ['gemini', 'vertex', 'antigravity', 'codex']
+  );
+  assert.deepEqual(
+    getProviderCycle(null),
+    ['gemini', 'vertex', 'antigravity', 'codex']
+  );
+});
