@@ -1,0 +1,67 @@
+name: Build macOS (M-series ARM64 & Intel)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'main.js'
+      - 'preload.js'
+      - 'src/**'
+      - 'renderer/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'electron-builder.cjs'
+      - '.github/workflows/build-macos.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS (arm64 & x64)
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build macOS Apple Silicon (arm64)
+        run: npm run dist:mac:arm64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAC_SIGN: ${{ secrets.CSC_LINK != '' && '1' || '' }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Build macOS Intel (x64)
+        run: npm run dist:mac:x64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAC_SIGN: ${{ secrets.CSC_LINK != '' && '1' || '' }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Upload macOS ARM64 (Apple Silicon M-Series) Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: cue-mac-arm64
+          path: dist/*arm64*.zip
+          retention-days: 14
+
+      - name: Upload macOS x64 (Intel) Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: cue-mac-x64
+          path: dist/*x64*.zip
+          retention-days: 14

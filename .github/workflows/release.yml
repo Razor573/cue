@@ -1,6 +1,7 @@
 name: Build and Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*' # Automatically trigger when you push a new version tag (e.g., v0.2.0)
