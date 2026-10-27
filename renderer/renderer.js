@@ -1990,6 +1990,7 @@
         document.querySelectorAll('#antigravity-thinking button').forEach((b) => {
       b.classList.toggle('on', b.dataset.thinking === (settings.antigravityThinkingLevel || 'LOW'));
     });
+    if ($('#antigravity-web-search')) $('#antigravity-web-search').checked = !!settings.antigravityWebSearch;
     renderAntigravityAuthStatus(settings.antigravityStatus);
     renderCodexAuthStatus(settings.codexStatus);
     updateVertexStatusBadge();
@@ -2025,6 +2026,7 @@
       document.querySelectorAll('#antigravity-thinking button').forEach((b) => {
       b.classList.toggle('on', b.dataset.thinking === (settings.antigravityThinkingLevel || 'LOW'));
     });
+    if ($('#antigravity-web-search')) $('#antigravity-web-search').checked = !!settings.antigravityWebSearch;
     renderAntigravityAuthStatus(settings.antigravityStatus);
     renderCodexAuthStatus(settings.codexStatus);
     updateVertexStatusBadge();
@@ -2338,6 +2340,7 @@
         vertexWebSearch: !!($('#vertex-web-search') && $('#vertex-web-search').checked),
         geminiThinkingLevel: settings.geminiThinkingLevel || 'LOW',
         geminiWebSearch: !!($('#gemini-web-search') && $('#gemini-web-search').checked),
+        antigravityWebSearch: !!($('#antigravity-web-search') && $('#antigravity-web-search').checked),
         fastModel: ($('#model-fast') && $('#model-fast').value.trim()) || '',
         smartModel: ($('#model-smart') && $('#model-smart').value.trim()) || ''
       });
@@ -2611,6 +2614,7 @@
     document.querySelectorAll('#antigravity-thinking button').forEach((b) => {
       b.classList.toggle('on', b.dataset.thinking === (settings.antigravityThinkingLevel || 'LOW'));
     });
+    if ($('#antigravity-web-search')) $('#antigravity-web-search').checked = !!settings.antigravityWebSearch;
     renderAntigravityAuthStatus(settings.antigravityStatus);
     renderCodexAuthStatus(settings.codexStatus);
     updateVertexStatusBadge();
@@ -3015,6 +3019,7 @@
     if ($('#vertex-location')) settings.vertexLocation = $('#vertex-location').value || 'global';
     if ($('#vertex-web-search')) settings.vertexWebSearch = !!$('#vertex-web-search').checked;
     if ($('#gemini-web-search')) settings.geminiWebSearch = !!$('#gemini-web-search').checked;
+    if ($('#antigravity-web-search')) settings.antigravityWebSearch = !!$('#antigravity-web-search').checked;
     const typedVertexSa = ($('#vertex-sa-json') && $('#vertex-sa-json').value.trim()) || '';
     if (typedVertexSa) {
       settings.apiKeys.vertex = typedVertexSa;

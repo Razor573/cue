@@ -933,7 +933,7 @@ function createLLM(settings, fetchImpl = fetch) {
           const res = await streamAntigravity(
             {
               thinkingLevel: settings.antigravityThinkingLevel || (settings.smart ? 'HIGH' : 'LOW'),
-              googleSearch: !!settings.geminiWebSearch,
+              googleSearch: !!settings.antigravityWebSearch,
               oauthStorageOptions: settings.oauthStorageOptions
             },
             {
@@ -1158,6 +1158,8 @@ async function testProviderConnection(settings = {}, override = {}, fetchImpl = 
     vertexLocation: override.vertexLocation !== undefined ? override.vertexLocation : (settings.vertexLocation || 'global'),
     vertexThinkingLevel: override.vertexThinkingLevel !== undefined ? override.vertexThinkingLevel : (settings.vertexThinkingLevel || 'LOW'),
     vertexWebSearch: override.vertexWebSearch !== undefined ? !!override.vertexWebSearch : !!settings.vertexWebSearch,
+    antigravityThinkingLevel: override.antigravityThinkingLevel !== undefined ? override.antigravityThinkingLevel : (settings.antigravityThinkingLevel || 'LOW'),
+    antigravityWebSearch: override.antigravityWebSearch !== undefined ? !!override.antigravityWebSearch : !!settings.antigravityWebSearch,
     models: {
       ...(settings.models || {}),
       [provider]: {

@@ -714,40 +714,66 @@ function buildAntigravityThinkingConfig(wireModel, thinkingLevel) {
   };
 }
 
+// Native web search experiment verdict: supported (grounding observed).
+// The internal Code Assist streamGenerateContent endpoint accepts `tools: [{ googleSearch: {} }]`,
+// executes real-time web searches, and returns `groundingMetadata` containing search queries and web citations.
+function buildAntigravityPayload({
+  projectId,
+  model,
+  system,
+  turns,
+  imageDataUrl,
+  maxTokens,
+  thinkingLevel = 'LOW',
+  googleSearch = false,
+  requestId
+} = {}) {
+  const wireModel = resolveAntigravityWireModel(model);
+  const contents = buildAntigravityContents(turns, imageDataUrl);
+  const generationConfig = {
+    maxOutputTokens: maxTokens || 2048,
+    thinkingConfig: buildAntigravityThinkingConfig(wireModel, thinkingLevel)
+  };
+  const innerRequest = {
+    contents,
+    generationConfig
+  };
+  if (system) {
+    innerRequest.systemInstruction = {
+      role: 'user',
+      parts: [{ text: String(system) }]
+    };
+  }
+  if (googleSearch) {
+    innerRequest.tools = [{ googleSearch: {} }];
+  }
+  return {
+    project: projectId,
+    model: wireModel,
+    userAgent: 'antigravity',
+    requestType: 'agent',
+    requestId: requestId || `agent-${crypto.randomUUID()}`,
+    request: innerRequest
+  };
+}
+
 async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
   const storageOpts = getStorageOpts(config);
   let session = await ensureAntigravitySession({ ...config, oauthStorageOptions: storageOpts, fetchImpl });
 
   const wireModel = resolveAntigravityWireModel(params.model);
-  const contents = buildAntigravityContents(params.turns, params.imageDataUrl);
-  const generationConfig = {
-    maxOutputTokens: params.maxTokens || 2048,
-    thinkingConfig: buildAntigravityThinkingConfig(wireModel, config.thinkingLevel || 'LOW')
-  };
 
-  const buildPayload = (projectId) => {
-    const innerRequest = {
-      contents,
-      generationConfig
-    };
-    if (params.system) {
-      innerRequest.systemInstruction = {
-        role: 'user',
-        parts: [{ text: String(params.system) }]
-      };
-    }
-    if (config.googleSearch) {
-      innerRequest.tools = [{ googleSearch: {} }];
-    }
-    return {
-      project: projectId,
-      model: wireModel,
-      userAgent: 'antigravity',
-      requestType: 'agent',
-      requestId: `agent-${crypto.randomUUID()}`,
-      request: innerRequest
-    };
-  };
+  const buildPayload = (projectId) =>
+    buildAntigravityPayload({
+      projectId,
+      model: params.model,
+      system: params.system,
+      turns: params.turns,
+      imageDataUrl: params.imageDataUrl,
+      maxTokens: params.maxTokens,
+      thinkingLevel: config.thinkingLevel || 'LOW',
+      googleSearch: Boolean(config.googleSearch)
+    });
 
   const sendStreamRequest = (accessToken, projectId) =>
     fetchImpl(ANTIGRAVITY_STREAM_URL, {
@@ -795,6 +821,7 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
+  let groundingMetadata = null;
 
   const processEventData = (dataStr) => {
     if (!dataStr || dataStr === '[DONE]') return;
@@ -805,8 +832,16 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
       return;
     }
     const envelope = parsed && parsed.response ? parsed.response : parsed;
+    if (envelope && envelope.groundingMetadata && !groundingMetadata) {
+      groundingMetadata = envelope.groundingMetadata;
+      if (typeof params.onGrounding === 'function') params.onGrounding(groundingMetadata);
+    }
     const candidates = envelope && Array.isArray(envelope.candidates) ? envelope.candidates : [];
     for (const candidate of candidates) {
+      if (candidate && candidate.groundingMetadata && !groundingMetadata) {
+        groundingMetadata = candidate.groundingMetadata;
+        if (typeof params.onGrounding === 'function') params.onGrounding(groundingMetadata);
+      }
       const parts = candidate && candidate.content && Array.isArray(candidate.content.parts)
         ? candidate.content.parts
         : [];
@@ -844,7 +879,8 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
   return {
     fullText,
     model: wireModel,
-    projectId: session.projectId
+    projectId: session.projectId,
+    groundingMetadata
   };
 }
 
@@ -879,5 +915,6 @@ module.exports = {
   signOutAntigravity,
   getAntigravityStatus,
   listAntigravityModels,
+  buildAntigravityPayload,
   streamAntigravity
 };

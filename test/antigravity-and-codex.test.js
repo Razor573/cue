@@ -692,3 +692,186 @@ test('12. User-configurable provider rotation ticks in store and main cycle', ()
     ['gemini', 'vertex', 'antigravity', 'codex']
   );
 });
+
+test('13. Antigravity native web search experiment: toggle plumbing, payload byte-identity, grounding metadata parsing, and error surfacing', async () => {
+  const { DEFAULTS } = require('../src/store');
+  const {
+    buildAntigravityPayload,
+    streamAntigravity,
+    resolveAntigravityWireModel,
+    AntigravityError
+  } = require('../src/antigravity');
+  const { createLLM } = require('../src/llm');
+
+  // 1. Defaults to false
+  assert.equal(DEFAULTS.antigravityWebSearch, false);
+
+  // 2. Payload shape: byte-identical with tools omitted when false, included when true
+  const payloadOff = buildAntigravityPayload({
+    projectId: 'test-project',
+    model: 'gemini-3.8-flash',
+    system: 'Be concise.',
+    turns: [{ role: 'user', text: 'Recent news' }],
+    maxTokens: 512,
+    googleSearch: false
+  });
+  assert.equal(payloadOff.request.tools, undefined, 'tools must be omitted when googleSearch is false');
+  assert.equal('tools' in payloadOff.request, false);
+
+  const payloadOn = buildAntigravityPayload({
+    projectId: 'test-project',
+    model: 'gemini-3.8-flash',
+    system: 'Be concise.',
+    turns: [{ role: 'user', text: 'Recent news' }],
+    maxTokens: 512,
+    googleSearch: true
+  });
+  assert.deepEqual(payloadOn.request.tools, [{ googleSearch: {} }], 'tools must contain [{ googleSearch: {} }] when googleSearch is true');
+
+  // Verify byte-identical innerRequest fields except tools
+  const { tools: _discard, ...onWithoutTools } = payloadOn.request;
+  assert.deepEqual(onWithoutTools, payloadOff.request);
+
+  // 3. Response parsing: with grounding metadata
+  const fakeGrounding = {
+    webSearchQueries: ['Super Bowl LX winner'],
+    groundingChunks: [{ web: { uri: 'https://example.com/sb', title: 'Example Sports' } }],
+    groundingSupports: [{ segment: { text: 'Seattle Seahawks won.' }, groundingChunkIndices: [0] }]
+  };
+  const sseWithGrounding = [
+    'data: ' + JSON.stringify({
+      response: {
+        candidates: [{
+          content: { parts: [{ text: 'Seattle Seahawks won.' }] },
+          groundingMetadata: fakeGrounding
+        }]
+      }
+    }),
+    '',
+    'data: [DONE]',
+    ''
+  ].join('\n');
+
+  let observedGrounding = null;
+  const mockFetchWithGrounding = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.request.tools, [{ googleSearch: {} }]);
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(sseWithGrounding));
+          c.close();
+        }
+      })
+    };
+  };
+
+  const availableStorage = makeTempStorage(true);
+  try {
+    setProviderTokens(
+      'antigravity',
+      {
+        accessToken: 'ya29.test-search-token',
+        refreshToken: '1//refresh',
+        expiresAt: Date.now() + 3600_000,
+        projectId: 'test-search-proj'
+      },
+      availableStorage.storageOptions
+    );
+
+    const resWithSearch = await streamAntigravity(
+      { googleSearch: true, oauthStorageOptions: availableStorage.storageOptions },
+      {
+        model: 'gemini-3.8-flash',
+        turns: [{ role: 'user', text: 'Who won?' }],
+        onGrounding: (g) => { observedGrounding = g; }
+      },
+      mockFetchWithGrounding
+    );
+
+    assert.equal(resWithSearch.fullText, 'Seattle Seahawks won.');
+    assert.deepEqual(resWithSearch.groundingMetadata, fakeGrounding);
+    assert.deepEqual(observedGrounding, fakeGrounding);
+
+    // 4. Response parsing: without grounding metadata (search OFF)
+    const sseWithoutGrounding = [
+      'data: ' + JSON.stringify({
+        response: {
+          candidates: [{
+            content: { parts: [{ text: 'Kansas City Chiefs won in 2024.' }] }
+          }]
+        }
+      }),
+      '',
+      'data: [DONE]',
+      ''
+    ].join('\n');
+
+    let ungroundedCheck = false;
+    const mockFetchWithoutGrounding = async (url, init) => {
+      const body = JSON.parse(init.body);
+      assert.equal(body.request.tools, undefined);
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(sseWithoutGrounding));
+            c.close();
+          }
+        })
+      };
+    };
+
+    const resWithoutSearch = await streamAntigravity(
+      { googleSearch: false, oauthStorageOptions: availableStorage.storageOptions },
+      {
+        model: 'gemini-3.8-flash',
+        turns: [{ role: 'user', text: 'Who won?' }],
+        onGrounding: () => { ungroundedCheck = true; }
+      },
+      mockFetchWithoutGrounding
+    );
+
+    assert.equal(resWithoutSearch.fullText, 'Kansas City Chiefs won in 2024.');
+    assert.equal(resWithoutSearch.groundingMetadata, null);
+    assert.equal(ungroundedCheck, false, 'onGrounding must never be called when no grounding is present');
+
+    // 5. Clean error surfacing when endpoint rejects tools field
+    const mockFetchRejection = async () => {
+      return {
+        ok: false,
+        status: 400,
+        text: async () => 'Field "tools" is not supported on this endpoint'
+      };
+    };
+
+    await assert.rejects(
+      async () => {
+        await streamAntigravity(
+          { googleSearch: true, oauthStorageOptions: availableStorage.storageOptions },
+          { model: 'gemini-3.8-flash', turns: [{ role: 'user', text: 'test' }] },
+          mockFetchRejection
+        );
+      },
+      (err) => {
+        assert.ok(err instanceof AntigravityError);
+        assert.equal(err.status, 400);
+        assert.match(err.message, /Field "tools" is not supported on this endpoint/);
+        return true;
+      }
+    );
+  } finally {
+    availableStorage.cleanup();
+  }
+
+  // 6. UI & Verdict checks
+  const html = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
+  assert.ok(html.includes('id="antigravity-web-search"'));
+  assert.match(html, /Verdict:\s*supported\s*\(grounding observed\)/);
+
+  const antigravitySrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'antigravity.js'), 'utf8');
+  assert.match(antigravitySrc, /verdict:\s*supported\s*\(grounding observed\)/i);
+});

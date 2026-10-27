@@ -64,6 +64,7 @@ const DEFAULTS = {
   vertexThinkingLevel: 'LOW',
   vertexWebSearch: false,
   antigravityThinkingLevel: 'LOW',
+  antigravityWebSearch: false,
   geminiSttModel: 'gemini-3.5-transcribe',
   geminiSttFallbackModel: 'gemini-3.5-flash-lite',
   // publik API (packaged-build default). apiKeys.publik holds the minted key;
