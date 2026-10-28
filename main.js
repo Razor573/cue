@@ -2,14 +2,14 @@ const { app, BrowserWindow, ipcMain, globalShortcut, screen, session, desktopCap
 const path = require('path');
 const os = require('os');
 const store = require('./src/store');
-const { captureScreenshot } = require('./src/screen');
+const { captureScreenshot, captureScreenshotDetailed } = require('./src/screen');
 const { createSTT } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
 const { createLLM, listProviderModels, testProviderConnection, listGeminiSTTModels } = require('./src/llm');
 const { validateServiceAccountJson } = require('./src/vertex-ai');
 const { signInAntigravity, signOutAntigravity, getAntigravityStatus } = require('./src/antigravity');
 const { signInCodex, signOutCodex, getCodexStatus } = require('./src/codex');
-const { MODES } = require('./src/prompts');
+const { MODES, isAssessmentRefusal, LEETCODE_REFUSAL_REINFORCEMENT } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
 const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
@@ -932,6 +932,10 @@ function abortActiveFeature() {
   }
 }
 
+// One-shot: set when a leetcode answer was an assessment refusal; the next
+// leetcode run gets the reinforced instruction, then the flag clears.
+let leetcodeRefusalRepair = false;
+
 async function runFeature(mode, userText) {
   if (state.busy) {
     if (activeFeatureAbort) {
@@ -1017,20 +1021,28 @@ async function runFeature(mode, userText) {
       send('companion:consumed', { title: companionContext.title });
     }
     if (def.needsScreen) {
+      let screenBlack = false;
       try {
-        imageDataUrl = await captureScreenshot();
-        if (!imageDataUrl && !companionContext) throw new Error('No screen source was available.');
+        const shot = await captureScreenshotDetailed();
+        imageDataUrl = shot.dataUrl;
+        screenBlack = shot.black;
+        if (!imageDataUrl && !companionContext) throw new Error(screenBlack ? 'SCREEN_BLACK' : 'No screen source was available.');
       }
       catch (e) {
         if (!companionContext) {
           recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
-          const message = process.platform === 'darwin'
-            ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
-            : process.platform === 'win32'
-              ? 'Screen capture failed. Make sure cue is not blocked by Windows privacy or security software, then try again.'
-              : 'Screen capture failed. Check your desktop capture permissions, then try again.';
+          const message = (e && e.message === 'SCREEN_BLACK')
+            ? 'Screenshot came back black - this window may block screen capture. Capture the page with the browser companion (Ctrl+Shift+B) and try again.'
+            : process.platform === 'darwin'
+              ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
+              : process.platform === 'win32'
+                ? 'Screen capture failed. Make sure cue is not blocked by Windows privacy or security software, then try again.'
+                : 'Screen capture failed. Check your desktop capture permissions, then try again.';
           send('status', { message });
         }
+      }
+      if (screenBlack && companionContext) {
+        send('status', { message: 'Screenshot came back black - using the captured page text instead.' });
       }
     }
 
@@ -1073,6 +1085,10 @@ async function runFeature(mode, userText) {
     let system = def.buildSystem ? def.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (def.system || '');
     if (priorityOverrideBlock) {
       system = system + priorityOverrideBlock;
+    }
+    if (mode === 'leetcode' && leetcodeRefusalRepair) {
+      system = system + '\n\n' + LEETCODE_REFUSAL_REINFORCEMENT;
+      leetcodeRefusalRepair = false;
     }
     let built = def.build({ transcript, userText: effectiveUserText });
     if (companionContext) {
@@ -1146,6 +1162,12 @@ async function runFeature(mode, userText) {
     }
     if (!currentAbort.signal.aborted) {
       send('llm:done', {});
+    }
+    if (mode === 'leetcode' && !currentAbort.signal.aborted && fullAnswerText.trim() && isAssessmentRefusal(fullAnswerText)) {
+      // The model refused after seeing assessment chrome. The next leetcode
+      // run retries with a reinforced instruction (one-shot, see above).
+      leetcodeRefusalRepair = true;
+      send('status', { message: 'The model refused this coding problem after seeing assessment chrome - press Solve what\'s on screen again and it will retry with a reinforced instruction.' });
     }
     if (settings.claimValidator && !currentAbort.signal.aborted && fullAnswerText.trim()) {
       if (trace) trace.mark('validation_started');

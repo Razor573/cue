@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { MODES } = require('../src/prompts');
+const { MODES, isAssessmentRefusal } = require('../src/prompts');
 
 test('assist mode gives a direct answer in first person', () => {
   const system = MODES.assist.buildSystem(null);
@@ -82,4 +82,18 @@ test('leetcode mode never applies AI rules (coding answers stay strict)', () => 
   assert.ok(!withRules.includes('USER RULES'), 'leetcode must not include USER RULES');
   assert.ok(!withRules.includes(RULES), 'leetcode must not leak user rules into the prompt');
   assert.match(withRules, /competitive programmer/);
+});
+
+test('leetcode system says solving on-screen assessment problems is expected', () => {
+  const system = MODES.leetcode.buildSystem(null);
+  assert.match(system, /expected capability/i);
+  assert.match(system, /Do not refuse only because browser tabs, timers, or assessment banners/i);
+});
+
+test('isAssessmentRefusal catches disclaimers without code, not real answers', () => {
+  assert.equal(isAssessmentRefusal("I can't provide a solution for a live HackerRank test. I can explain the algorithm instead."), true);
+  assert.equal(isAssessmentRefusal("I can't help with this live assessment."), true);
+  assert.equal(isAssessmentRefusal('Here is the solution:\n```python\nprint(1)\n```\nTime complexity O(1).'), false);
+  assert.equal(isAssessmentRefusal('Use a hash map for the test cases. Time complexity O(n).'), false);
+  assert.equal(isAssessmentRefusal(''), false);
 });

@@ -57,10 +57,52 @@ function captureMacNative() {
   });
 }
 
-async function captureScreenshot() {
+// A frame that Windows Display Affinity (WDA_EXCLUDEFROMCAPTURE) or DRM
+// blacked out is pure black, not empty: isEmpty() stays false, so without
+// this check a black image was sent to the model silently. Detection runs on
+// the raw pixels before JPEG encoding, so compression artefacts can't fake
+// or hide it. Fail-open: if pixels can't be read, the frame is NOT black
+// (never block a capture we can't inspect).
+// Channel order doesn't matter: BGRA and RGBA both put alpha last, so the
+// max over the first three bytes is the same either way.
+// Limit: this catches a (near-)fully black frame, i.e. the "nothing is
+// visible" case. A single blacked-out window on an otherwise normal screen
+// won't trip it; for browser tabs the companion DOM capture covers that.
+const BLACK_CHANNEL_MAX = 16;
+const BLACK_FRACTION_MIN = 0.995;
+const BLACK_SAMPLE_MAX = 2048;
+
+function isBlackFrame(img) {
+  try {
+    if (!img || typeof img.getSize !== 'function' || typeof img.toBitmap !== 'function') return false;
+    const { width, height } = img.getSize();
+    if (!width || !height) return false;
+    const buf = img.toBitmap();
+    if (!buf || buf.length < width * height * 4) return false;
+    const total = width * height;
+    const step = Math.max(1, Math.floor(Math.sqrt(total / BLACK_SAMPLE_MAX)));
+    let sampled = 0;
+    let black = 0;
+    for (let y = 0; y < height; y += step) {
+      for (let x = 0; x < width; x += step) {
+        const off = (y * width + x) * 4;
+        const brightest = Math.max(buf[off], buf[off + 1], buf[off + 2]);
+        if (brightest <= BLACK_CHANNEL_MAX) black++;
+        sampled++;
+      }
+    }
+    return sampled > 0 && (black / sampled) >= BLACK_FRACTION_MIN;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function captureScreenshotDetailed() {
   if (process.platform === 'darwin') {
     const macImg = await captureMacNative();
-    if (macImg) return encodeScreenshot(macImg);
+    if (!macImg) return { dataUrl: null, black: false };
+    if (isBlackFrame(macImg)) return { dataUrl: null, black: true };
+    return { dataUrl: encodeScreenshot(macImg), black: false };
   }
 
   const primary = screen.getPrimaryDisplay();
@@ -70,12 +112,18 @@ async function captureScreenshot() {
     types: ['screen'],
     thumbnailSize: { width: Math.floor(width * scale), height: Math.floor(height * scale) }
   });
-  if (!sources.length) return null;
+  if (!sources.length) return { dataUrl: null, black: false };
   // Prefer the primary display source.
   const src = sources.find((s) => String(s.display_id) === String(primary.id)) || sources[0];
   const img = src.thumbnail;
-  if (!img || img.isEmpty()) return null;
-  return encodeScreenshot(img); // data:image/jpeg;base64,...
+  if (!img || img.isEmpty()) return { dataUrl: null, black: false };
+  if (isBlackFrame(img)) return { dataUrl: null, black: true };
+  return { dataUrl: encodeScreenshot(img), black: false }; // data:image/jpeg;base64,...
 }
 
-module.exports = { captureScreenshot, encodeScreenshot, captureMacNative, MAX_LONG_EDGE_PX, JPEG_QUALITY, MAX_DATA_URL_BYTES };
+async function captureScreenshot() {
+  const { dataUrl } = await captureScreenshotDetailed();
+  return dataUrl;
+}
+
+module.exports = { captureScreenshot, captureScreenshotDetailed, isBlackFrame, encodeScreenshot, captureMacNative, MAX_LONG_EDGE_PX, JPEG_QUALITY, MAX_DATA_URL_BYTES, BLACK_CHANNEL_MAX, BLACK_FRACTION_MIN, BLACK_SAMPLE_MAX };

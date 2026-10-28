@@ -9,7 +9,7 @@ Module._load = function loadWithElectronStub(request, parent, isMain) {
   if (request === 'electron') return { desktopCapturer: {}, screen: {} };
   return originalModuleLoad.call(this, request, parent, isMain);
 };
-const { encodeScreenshot, MAX_LONG_EDGE_PX, JPEG_QUALITY, MAX_DATA_URL_BYTES } = require('../src/screen');
+const { encodeScreenshot, isBlackFrame, MAX_LONG_EDGE_PX, JPEG_QUALITY, MAX_DATA_URL_BYTES, BLACK_CHANNEL_MAX, BLACK_FRACTION_MIN } = require('../src/screen');
 Module._load = originalModuleLoad;
 
 // A stand-in for Electron's NativeImage. The JPEG size is modelled as a fixed
@@ -62,4 +62,59 @@ test('a small capture is never upscaled', () => {
   const log = [];
   encodeScreenshot(fakeImage(1280, 800, log));
   assert.deepEqual(log, [{ toJPEG: JPEG_QUALITY }]);
+});
+
+// ── Black-frame detection ──────────────────────────────────────────────────
+// A stand-in for Electron's NativeImage with real pixel bytes. isBlackFrame
+// only uses the max of the first three bytes, so BGRA and RGBA both work.
+function fakeBitmapImage(width, height, pixel) {
+  const buf = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const off = (y * width + x) * 4;
+      const [r, g, b] = pixel(x, y);
+      buf[off] = b; buf[off + 1] = g; buf[off + 2] = r; buf[off + 3] = 255;
+    }
+  }
+  return {
+    getSize: () => ({ width, height }),
+    isEmpty: () => false,
+    toBitmap: () => buf,
+  };
+}
+
+test('black-frame thresholds are what the detector documents', () => {
+  assert.equal(BLACK_CHANNEL_MAX, 16);
+  assert.equal(BLACK_FRACTION_MIN, 0.995);
+});
+
+test('an all-black frame is black', () => {
+  assert.equal(isBlackFrame(fakeBitmapImage(64, 64, () => [0, 0, 0])), true);
+});
+
+test('an all-white frame is not black', () => {
+  assert.equal(isBlackFrame(fakeBitmapImage(64, 64, () => [255, 255, 255])), false);
+});
+
+test('dark gray above the channel threshold is not black', () => {
+  assert.equal(isBlackFrame(fakeBitmapImage(64, 64, () => [30, 30, 30])), false);
+});
+
+// 40x40 = 1600 pixels, under the 2048 sample cap, so every pixel is sampled
+// and the fractions below are exact, not sampling artefacts.
+test('a frame with 1% bright pixels is not black (below the 99.5% bar)', () => {
+  let n = 0;
+  const img = fakeBitmapImage(40, 40, () => (n++ < 16 ? [255, 255, 255] : [0, 0, 0]));
+  assert.equal(isBlackFrame(img), false);
+});
+
+test('a frame with 0.375% bright pixels is black (above the 99.5% bar)', () => {
+  let n = 0;
+  const img = fakeBitmapImage(40, 40, () => (n++ < 6 ? [255, 255, 255] : [0, 0, 0]));
+  assert.equal(isBlackFrame(img), true);
+});
+
+test('an image without pixel access fails open (not black)', () => {
+  assert.equal(isBlackFrame({ getSize: () => ({ width: 64, height: 64 }), isEmpty: () => false }), false);
+  assert.equal(isBlackFrame(null), false);
 });
