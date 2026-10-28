@@ -1016,19 +1016,21 @@ async function runFeature(mode, userText) {
     if (companionContext) {
       send('companion:consumed', { title: companionContext.title });
     }
-    if (def.needsScreen && !companionContext) {
+    if (def.needsScreen) {
       try {
         imageDataUrl = await captureScreenshot();
-        if (!imageDataUrl) throw new Error('No screen source was available.');
+        if (!imageDataUrl && !companionContext) throw new Error('No screen source was available.');
       }
       catch (e) {
-        recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
-        const message = process.platform === 'darwin'
-          ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
-          : process.platform === 'win32'
-            ? 'Screen capture failed. Make sure cue is not blocked by Windows privacy or security software, then try again.'
-            : 'Screen capture failed. Check your desktop capture permissions, then try again.';
-        send('status', { message });
+        if (!companionContext) {
+          recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
+          const message = process.platform === 'darwin'
+            ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
+            : process.platform === 'win32'
+              ? 'Screen capture failed. Make sure cue is not blocked by Windows privacy or security software, then try again.'
+              : 'Screen capture failed. Check your desktop capture permissions, then try again.';
+          send('status', { message });
+        }
       }
     }
 
@@ -1925,6 +1927,8 @@ const APP_SHORTCUT_KEYS = [
   'CommandOrControl+Shift+V',
   'CommandOrControl+O',
   'CommandOrControl+Shift+O',
+  'CommandOrControl+Shift+B',
+  'CommandOrControl+Alt+B',
   'CommandOrControl+Shift+U',
   'CommandOrControl+H',
   'CommandOrControl+Shift+/',
@@ -2209,6 +2213,28 @@ function registerAppShortcuts() {
     removeLastAttachedFile();
   });
 
+  // Browser companion capture (Extension)
+  const triggerCompanionCapture = () => {
+    if (!companionServer) {
+      send('status', { message: 'Browser companion is not active.' });
+      return;
+    }
+    const res = companionServer.requestDesktopCapture();
+    if (res && res.sentCount > 0) {
+      send('status', { message: 'Capturing active browser tab…' });
+    } else {
+      send('status', { message: 'No extension connected. Pair in Settings → Companion.' });
+    }
+  };
+  globalShortcut.register('CommandOrControl+Shift+B', () => {
+    if (!isOverlayVisible()) return;
+    triggerCompanionCapture();
+  });
+  globalShortcut.register('CommandOrControl+Alt+B', () => {
+    if (!isOverlayVisible()) return;
+    triggerCompanionCapture();
+  });
+
   // Update check
   globalShortcut.register('CommandOrControl+Shift+U', () => {
     if (!isOverlayVisible()) return;
@@ -2473,9 +2499,10 @@ function launchApp() {
 
   if (!companionServer) {
     companionServer = createCompanionServer({
-      isSessionActive: () => Boolean(state.capturing || (win && win.isVisible())),
+      isSessionActive: () => Boolean(win && !win.isDestroyed()),
       onCaptured: ({ title, text, url }) => {
         send('companion:captured', { title, text, url });
+        send('status', { message: `Captured browser: ${title || 'active tab'}` });
       }
     });
     companionServer.start().catch((err) => {

@@ -269,3 +269,21 @@ test('formatDossierForPrompt & interview-context integration', () => {
   const leetcodeCtx = buildInterviewContext(settings, 'leetcode', []);
   assert.strictEqual(leetcodeCtx, null);
 });
+
+test('store integration - handles null currentDossier merging without throwing', () => {
+  const store = require('../src/store');
+  store.setSettings({ currentDossier: null });
+  const dossier = {
+    company: 'Stripe',
+    sections: {
+      overview: 'Global payments',
+      whatTheyDo: 'APIs'
+    }
+  };
+  const saved = store.setSettings({ currentDossier: dossier });
+  assert.strictEqual(saved.currentDossier.company, 'Stripe');
+  assert.strictEqual(saved.currentDossier.sections.overview, 'Global payments');
+
+  const cleared = store.setSettings({ currentDossier: null });
+  assert.strictEqual(cleared.currentDossier, null);
+});

@@ -175,9 +175,19 @@ let data = null;
 let lastError = null;
 
 function deepMerge(base, over) {
+  if (!base || typeof base !== 'object') {
+    return Array.isArray(over) ? over.slice() : (over && typeof over === 'object' ? { ...over } : over);
+  }
   const out = Array.isArray(base) ? base.slice() : { ...base };
   for (const k of Object.keys(over || {})) {
-    if (over[k] && typeof over[k] === 'object' && !Array.isArray(over[k]) && typeof base[k] === 'object') {
+    if (
+      over[k] &&
+      typeof over[k] === 'object' &&
+      !Array.isArray(over[k]) &&
+      base[k] &&
+      typeof base[k] === 'object' &&
+      !Array.isArray(base[k])
+    ) {
       out[k] = deepMerge(base[k], over[k]);
     } else {
       if (k === 'aiRules' && typeof over[k] === 'string') {
