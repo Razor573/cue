@@ -16,7 +16,7 @@ const GENERIC_COMPANY_WORDS = new Set([
 function cleanCandidate(raw) {
   if (!raw || typeof raw !== 'string') return '';
   let s = raw.trim();
-  s = s.replace(/^[*_"`']+|[*_"`':,;.!?-]+$/g, '').trim();
+  s = s.replace(/^[*_"`'#]+|[*_"`':,;.!?#-]+$/g, '').trim();
   if (s.length < 2 || s.length > 50) return '';
   if (GENERIC_COMPANY_WORDS.has(s.toLowerCase())) return '';
   const words = s.split(/\s+/);
@@ -27,7 +27,7 @@ function cleanCandidate(raw) {
 
 /**
  * extractCompanyFromJD(jdText)
- * Parses job description text to identify company name.
+ * Parses job description text to identify company name using rich heuristic extraction.
  * Returns { company, candidates, ambiguous }
  */
 function extractCompanyFromJD(jdText) {
@@ -38,31 +38,58 @@ function extractCompanyFromJD(jdText) {
   const cleanText = jdText.trim();
   const rawCandidates = [];
 
-  // 1. Labeled lines: Company: <Name>, Employer: <Name>, Organization: <Name>
-  const labeledRegex = /(?:^|\n)\s*(?:Company|Employer|Organization)\s*:\s*([^\n\r,;]+)/gi;
+  // 1. Labeled lines: Company: <Name>, Employer: <Name>, Organization: <Name>, Client: <Name>
+  const labeledRegex = /(?:^|\n)\s*(?:Company|Employer|Organization|Client)\s*:\s*([^\n\r,;]+)/gi;
   let lm;
   while ((lm = labeledRegex.exec(cleanText)) !== null) {
     const cleaned = cleanCandidate(lm[1]);
     if (cleaned) rawCandidates.push(cleaned);
   }
 
-  // 2. High-confidence intro patterns: About <Company>, At <Company>, Join <Company>, etc.
-  const introRegex = /(?:^|\n|\.\s+)(?:About|Join|Why|Welcome to|Working at|At)\s+([A-Z0-9][A-Za-z0-9&. -]{1,40}?)(?=[,\n\r.!]|\s+(?:is|we|our|are|was|builds|helps|to|for|on)\b)/g;
+  // 2. Header / Title line patterns:
+  // e.g. "Senior Software Engineer - Stripe", "Full Stack Developer at Linear", "Product Designer | Figma", "Staff SRE @ Datadog"
+  const headerLines = cleanText.split(/\r?\n/).slice(0, 5);
+  for (const line of headerLines) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.length > 100) continue;
+    // Format: Role - Company or Company - Role
+    const dashMatch = trimmedLine.match(/^(?:.*?\b(?:engineer|developer|manager|lead|architect|designer|scientist|intern|vp|director|specialist|analyst|associate|head|consultant)\b.*?)?\s*[-–—|•·@]\s*([A-Z0-9][A-Za-z0-9&. -]{1,35})$/i);
+    if (dashMatch) {
+      const c = cleanCandidate(dashMatch[1]);
+      if (c) rawCandidates.push(c);
+    }
+    const reverseDash = trimmedLine.match(/^([A-Z0-9][A-Za-z0-9&. -]{1,35})\s*[-–—|•·]\s*(?:.*?\b(?:engineer|developer|manager|lead|architect|designer|scientist|intern)\b.*?)$/i);
+    if (reverseDash) {
+      const c = cleanCandidate(reverseDash[1]);
+      if (c) rawCandidates.push(c);
+    }
+  }
+
+  // 3. High-confidence intro patterns: About <Company>, At <Company>, Join <Company>, Life at <Company>
+  const introRegex = /(?:^|\n|\.\s+)(?:About|Join|Why|Welcome to|Working at|Life at|Careers at|At)\s+([A-Z0-9][A-Za-z0-9&. -]{1,40}?)(?=[,\n\r.!]|\s+(?:is|we|our|are|was|builds|helps|to|for|on)\b)/g;
   let im;
   while ((im = introRegex.exec(cleanText)) !== null) {
     const cleaned = cleanCandidate(im[1]);
     if (cleaned) rawCandidates.push(cleaned);
   }
 
-  // 3. '<Company> is looking for', '<Company> is seeking'
-  const seekingRegex = /(?:^|\n|\.\s+)([A-Z0-9][A-Za-z0-9&. -]{1,40}?)\s+is\s+(?:looking\s+for|seeking)\b/gi;
+  // 4. '<Company> is looking for', '<Company> is seeking', '<Company> is hiring', '<Company> builds'
+  const seekingRegex = /(?:^|\n|\.\s+)([A-Z0-9][A-Za-z0-9&. -]{1,40}?)\s+is\s+(?:looking\s+for|seeking|hiring|building|revolutionizing|transforming)\b/gi;
   let sm;
   while ((sm = seekingRegex.exec(cleanText)) !== null) {
     const cleaned = cleanCandidate(sm[1]);
     if (cleaned) rawCandidates.push(cleaned);
   }
 
-  // 4. '<Company> overview', '<Company> careers', '<Company> team'
+  // 5. 'joining <Company>', 'role at <Company>', 'opportunity with <Company>'
+  const joiningRegex = /\b(?:joining|role at|position at|opportunity with|career at|team at)\s+([A-Z0-9][A-Za-z0-9&. -]{1,35}?)(?=[,\n\r.!]|\s+(?:team|as|in|where|to)\b)/gi;
+  let jm;
+  while ((jm = joiningRegex.exec(cleanText)) !== null) {
+    const cleaned = cleanCandidate(jm[1]);
+    if (cleaned) rawCandidates.push(cleaned);
+  }
+
+  // 6. '<Company> overview', '<Company> careers', '<Company> team'
   const overviewRegex = /(?:^|\n|\.\s+)([A-Z0-9][A-Za-z0-9&. -]{1,40}?)\s+(?:overview|careers|team)\b/gi;
   let om;
   while ((om = overviewRegex.exec(cleanText)) !== null) {
@@ -70,7 +97,16 @@ function extractCompanyFromJD(jdText) {
     if (cleaned) rawCandidates.push(cleaned);
   }
 
-  // 5. Ambiguity / multiple candidates patterns: 'formerly Google, Meta', 'clients include Microsoft, Apple'
+  // 7. Domain names / URLs in JD (e.g. https://boards.greenhouse.io/stripe or jobs.lever.co/linear or apply@stripe.com)
+  const urlRegex = /(?:https?:\/\/)?(?:careers\.|jobs\.|boards\.)?([a-zA-Z0-9-]+)\.(?:greenhouse\.io|lever\.co|workable\.com|ashbyhq\.com)/gi;
+  let um;
+  while ((um = urlRegex.exec(cleanText)) !== null) {
+    const name = um[1].charAt(0).toUpperCase() + um[1].slice(1).toLowerCase();
+    const cleaned = cleanCandidate(name);
+    if (cleaned) rawCandidates.push(cleaned);
+  }
+
+  // 8. Ambiguity / multiple candidates patterns: 'formerly Google, Meta', 'clients include Microsoft, Apple'
   const multiRegex = /(?:formerly|clients include|clients such as|partners include|alumni from)\s+([^\n\r.]+)/gi;
   let mm;
   while ((mm = multiRegex.exec(cleanText)) !== null) {
@@ -105,6 +141,73 @@ function extractCompanyFromJD(jdText) {
     candidates: uniqueCandidates,
     ambiguous: true
   };
+}
+
+/**
+ * extractCompanyWithLLM({ jdText, llm, timeoutMs })
+ * Uses the active LLM to analyze the entire job description context and accurately
+ * identify the hiring company name. Falls back to extractCompanyFromJD on error/timeout.
+ */
+async function extractCompanyWithLLM({ jdText, llm, timeoutMs = 4000 } = {}) {
+  if (!jdText || typeof jdText !== 'string' || !jdText.trim()) {
+    return { company: null, candidates: [], ambiguous: false };
+  }
+
+  // First try fast heuristics
+  const heuristic = extractCompanyFromJD(jdText);
+  if (heuristic.company && !heuristic.ambiguous) {
+    return heuristic;
+  }
+
+  // If heuristic failed or was ambiguous, use the LLM to analyze the entire context
+  if (llm && typeof llm.stream === 'function' && llm.ready) {
+    try {
+      const sample = jdText.trim().slice(0, 3500);
+      const prompt = `Analyze this Job Description and identify the company offering the job.
+
+Job Description:
+"""
+${sample}
+"""
+
+Respond in RAW JSON ONLY (no markdown formatting, no other text):
+{
+  "company": "<Hiring Company Name, or null if unmentioned>",
+  "candidates": ["<Hiring Company Name>"],
+  "ambiguous": false
+}`;
+
+      let output = '';
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs));
+      const streamPromise = llm.stream({
+        system: 'You are an expert recruiter and job analyst. Analyze the full context of job descriptions to extract the exact hiring company name. Return only a raw JSON object.',
+        turns: [{ role: 'user', text: prompt }],
+        onToken: (t) => { output += t; }
+      });
+
+      await Promise.race([streamPromise, timeoutPromise]);
+      const jsonStr = output.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+      const parsed = JSON.parse(jsonStr);
+
+      if (parsed && typeof parsed.company === 'string' && parsed.company.trim()) {
+        const c = cleanCandidate(parsed.company);
+        if (c) {
+          const rawCands = Array.isArray(parsed.candidates) && parsed.candidates.length > 0
+            ? parsed.candidates.map(cleanCandidate).filter(Boolean)
+            : [c];
+          return {
+            company: c,
+            candidates: rawCands.length ? rawCands : [c],
+            ambiguous: Boolean(parsed.ambiguous && rawCands.length > 1)
+          };
+        }
+      }
+    } catch {
+      // Fall through to heuristic result
+    }
+  }
+
+  return heuristic;
 }
 
 /**
@@ -458,12 +561,14 @@ async function generateCompanyDossier({ companyName, jdText = '', settings = {},
   const llm = factory(researchSettings);
 
   let capturedMetadata = null;
+  let tokenAccumulator = '';
   const streamResult = await llm.stream({
     system: 'You are an executive research briefing analyst preparing structured company intelligence dossiers for job interviews.',
     turns: [{ role: 'user', text: prompt }],
     tools: [{ googleSearch: {} }],
     webSearch: true,
     onToken: (t) => {
+      tokenAccumulator += t;
       if (typeof onToken === 'function') onToken(t);
     },
     onGroundingMetadata: (meta) => {
@@ -474,9 +579,9 @@ async function generateCompanyDossier({ companyName, jdText = '', settings = {},
     }
   });
 
-  const responseText = typeof streamResult === 'string'
+  const responseText = (typeof streamResult === 'string' && streamResult.trim())
     ? streamResult
-    : (streamResult && (streamResult.text || streamResult.fullText)) || '';
+    : (streamResult && (streamResult.text || streamResult.fullText)) || tokenAccumulator;
 
   const metadata = capturedMetadata || (streamResult && (streamResult.metadata || streamResult.groundingMetadata)) || null;
   const citations = parseGroundingMetadata(metadata);
@@ -522,6 +627,7 @@ function formatDossierForPrompt(dossier) {
 
 module.exports = {
   extractCompanyFromJD,
+  extractCompanyWithLLM,
   resolveResearchProvider,
   parseGroundingMetadata,
   extractNotesForCompany,

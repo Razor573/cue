@@ -23,10 +23,28 @@ try {
 const DEFAULT_START_PORT = 4123;
 const DEFAULT_END_PORT = 4134;
 const DEFAULT_EXTENSION_ID = 'cuecompanionchromepinnedid0001';
+const NATIVELY_STORE_ID = 'lmhgnkbjnelmciecjkleaomjpejcgaln';
+const NATIVELY_DEV_ID = 'macjecgdfliikhplbbdbpljomcigjnjg';
 const MAX_BODY_BYTES = 500000;
 const MAX_TEXT_CHARS = 25000;
 const RATE_LIMIT_MAX = 120;
 const RATE_LIMIT_WINDOW_MS = 60000;
+
+function isAllowedExtensionOrigin(origin, configuredId) {
+  if (!origin || typeof origin !== 'string') return false;
+  const allowedIds = new Set([
+    DEFAULT_EXTENSION_ID,
+    NATIVELY_STORE_ID,
+    NATIVELY_DEV_ID
+  ]);
+  if (configuredId) allowedIds.add(configuredId);
+
+  for (const id of allowedIds) {
+    if (origin === `chrome-extension://${id}`) return true;
+  }
+  // Structural match: standard Chrome extension IDs are 32 characters in range [a-p]
+  return /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+}
 
 function isLoopback(remoteAddress) {
   if (!remoteAddress) return false;
@@ -177,6 +195,10 @@ class CompanionServer {
     return this.port;
   }
 
+  getPairingString() {
+    return `${this.port || 4123}:${this.token}`;
+  }
+
   isPaired() {
     return this.hasPaired || this.clients.size > 0;
   }
@@ -318,13 +340,12 @@ class CompanionServer {
       if (!this.isPairingArmed()) {
         return this._sendJson(res, 410, { error: 'not_armed' }, corsHeaders);
       }
-      const expectedOrigin = `chrome-extension://${this.extensionId}`;
-      if (origin !== expectedOrigin) {
+      if (!isAllowedExtensionOrigin(origin, this.extensionId)) {
         return this._sendJson(res, 403, { error: 'invalid_origin' }, corsHeaders);
       }
       this.pairingWindowArmedUntil = 0;
       this.hasPaired = true;
-      return this._sendJson(res, 200, { token: this.token, port: this.port }, corsHeaders);
+      return this._sendJson(res, 200, { token: this.token, port: this.port, success: true, ok: true }, corsHeaders);
     }
 
     if (url.pathname === '/dom') {
@@ -371,6 +392,12 @@ class CompanionServer {
           return this._sendJson(res, 400, { error: 'bad_request' }, corsHeaders);
         }
 
+        // Liveness / connection probe from Natively or Cue extension popup:
+        // Authenticate successfully, but do NOT treat as user-captured context.
+        if (payload.probe === true) {
+          return this._sendJson(res, 200, { success: true, ok: true }, corsHeaders);
+        }
+
         const cleanText = redactSecrets(payload.dom).slice(0, MAX_TEXT_CHARS);
         const meta = payload.meta || {};
         this.capturedContext = {
@@ -391,7 +418,7 @@ class CompanionServer {
           } catch {}
         }
 
-        return this._sendJson(res, 200, { ok: true }, corsHeaders);
+        return this._sendJson(res, 200, { success: true, ok: true }, corsHeaders);
       });
       return;
     }

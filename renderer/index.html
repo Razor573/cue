@@ -396,6 +396,10 @@
 
         <!-- Company Dossier section -->
         <div id="company-dossier-wrap" class="company-dossier-wrap">
+          <div class="s-field" style="margin-bottom:8px;">
+            <span>Target Company</span>
+            <input id="dossier-company-input" type="text" placeholder="e.g. Stripe, Google, OpenAI (auto-detected from JD or type here)" autocomplete="off" />
+          </div>
           <div class="dossier-action-bar">
             <button id="dossier-research-btn" type="button" class="s-action primary">Research Company</button>
             <button id="dossier-clear-btn" type="button" class="s-action danger hidden">Clear Dossier</button>
@@ -696,7 +700,7 @@
       <div class="s-body s-tab-pane hidden" id="tab-companion" data-pane="companion">
         <div class="companion-card">
           <label class="s-label">Browser Companion</label>
-          <div class="s-note">Pair with the Cue Companion Chrome extension to capture web page DOM text and active tab selections directly into your prompts.</div>
+          <div class="s-note">Pair with the Natively browser extension or Cue Companion to capture webpage DOM text &amp; selections directly into prompt context.</div>
           <div class="companion-status-row">
             <span class="companion-status-badge" id="companion-status-badge">Checking…</span>
             <span class="companion-port-label" id="companion-port-label">Port: 4123</span>
@@ -706,6 +710,14 @@
             <button id="companion-capture-btn" class="s-action" type="button">Capture active tab</button>
           </div>
           <div id="companion-arm-status" class="s-note"></div>
+          <div class="s-field" style="margin-top:10px;">
+            <span>Pairing string</span>
+            <div style="display:flex;gap:6px;flex:1;">
+              <input id="companion-pairing-string" type="text" readonly style="font-family:var(--mono);font-size:11px;" placeholder="4123:..." />
+              <button id="companion-copy-pair-btn" class="s-action" type="button" style="white-space:nowrap;">Copy</button>
+            </div>
+          </div>
+          <div class="s-note">In the Natively extension popup, click <strong>Connect to Natively</strong>, or expand <strong>Pair manually instead</strong> and paste this pairing string.</div>
           <div class="s-field" style="margin-top:12px;">
             <span>Auto-attach</span>
             <label class="s-note" style="display:flex;align-items:center;gap:6px;cursor:pointer;">

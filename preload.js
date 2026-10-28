@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld('cue', {
   autoAnswerDismiss: (questionText) => ipcRenderer.invoke('autoanswer:dismiss', questionText),
   companionPairArm: () => ipcRenderer.invoke('companion:pair-arm'),
   companionStatus: () => ipcRenderer.invoke('companion:status'),
+  companionPairingString: () => ipcRenderer.invoke('companion:pairing-string'),
   companionTriggerCapture: () => ipcRenderer.invoke('companion:trigger-capture'),
   tracerSnapshot: () => ipcRenderer.invoke('tracer:snapshot'),
   log: (msg) => ipcRenderer.send('log', msg),

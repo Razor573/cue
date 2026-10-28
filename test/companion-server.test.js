@@ -61,31 +61,31 @@ test('1. Healthz discovery and port probing across range 4123..4134', async (t) 
   const server1 = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4123,
-    endPort: 4134
+    startPort: 4200,
+    endPort: 4205
   });
   t.after(async () => { await server1.stop(); });
 
   const port1 = await server1.start();
-  assert.equal(port1, 4123);
+  assert.equal(port1, 4200);
 
   const res1 = await httpRequest(`http://127.0.0.1:${port1}/healthz`);
   assert.equal(res1.status, 200);
   assert.equal(res1.json.ok, true);
   assert.equal(res1.json.clients, 0);
 
-  // Start second server: 4123 is occupied, probes and binds to 4124
+  // Start second server: 4200 is occupied, probes and binds to 4201
   const dir2 = createTempDir(t);
   const server2 = createCompanionServer({
     userDataDir: dir2,
     safeStorage: mockSafeStorage(),
-    startPort: 4123,
-    endPort: 4134
+    startPort: 4200,
+    endPort: 4205
   });
   t.after(async () => { await server2.stop(); });
 
   const port2 = await server2.start();
-  assert.equal(port2, 4124);
+  assert.equal(port2, 4201);
 
   const res2 = await httpRequest(`http://127.0.0.1:${port2}/healthz`);
   assert.equal(res2.status, 200);
@@ -97,8 +97,8 @@ test('2. Pairing window: armed 60s, burns on first pair, rejects expired, valida
   const server = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4125,
-    endPort: 4134
+    startPort: 4210,
+    endPort: 4215
   });
   t.after(async () => { await server.stop(); });
   const port = await server.start();
@@ -130,6 +130,16 @@ test('2. Pairing window: armed 60s, burns on first pair, rejects expired, valida
   assert.equal(validRes.status, 200);
   assert.ok(validRes.json.token);
   assert.equal(validRes.json.port, port);
+  assert.equal(validRes.json.success, true);
+
+  // D2. Natively Web Store extension origin works
+  server.armPairingWindow(60000);
+  const nativelyRes = await httpRequest(`http://127.0.0.1:${port}/pair`, {
+    method: 'POST',
+    headers: { origin: 'chrome-extension://lmhgnkbjnelmciecjkleaomjpejcgaln' }
+  });
+  assert.equal(nativelyRes.status, 200);
+  assert.equal(nativelyRes.json.success, true);
 
   // E. Burns on first pair: immediately calling again returns 410
   const burnedRes = await httpRequest(`http://127.0.0.1:${port}/pair`, {
@@ -153,8 +163,8 @@ test('3. Auth: 401 on bad/missing token, 200 on valid token', async (t) => {
   const server = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4126,
-    endPort: 4134
+    startPort: 4220,
+    endPort: 4225
   });
   t.after(async () => { await server.stop(); });
   const port = await server.start();
@@ -178,8 +188,8 @@ test('4. Rate limit: 120 requests per 60 seconds per IP returns 429', async (t) 
   const server = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4127,
-    endPort: 4134,
+    startPort: 4230,
+    endPort: 4235,
     rateLimitMax: 120,
     rateLimitWindowMs: 60000
   });
@@ -203,8 +213,8 @@ test('5. Body cap (>500k bytes -> 413) and text truncation to 25k chars', async 
   const server = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4128,
-    endPort: 4134
+    startPort: 4240,
+    endPort: 4245
   });
   t.after(async () => { await server.stop(); });
   const port = await server.start();
@@ -230,8 +240,8 @@ test('6. Status contracts: 405 on GET /dom, OPTIONS CORS 204, 409 when no active
   const server = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4129,
-    endPort: 4134,
+    startPort: 4250,
+    endPort: 4255,
     isSessionActive: () => sessionActive
   });
   t.after(async () => { await server.stop(); });
@@ -282,8 +292,8 @@ test('8. Single-use consumption (read-and-clear via consumeCapturedContext)', as
   const server = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4130,
-    endPort: 4134
+    startPort: 4260,
+    endPort: 4265
   });
   t.after(async () => { await server.stop(); });
   const port = await server.start();
@@ -311,8 +321,8 @@ test('9. WebSocket desktop-pull capture hotkey dispatch', async (t) => {
   const server = createCompanionServer({
     userDataDir: dir,
     safeStorage: mockSafeStorage(),
-    startPort: 4131,
-    endPort: 4134
+    startPort: 4270,
+    endPort: 4275
   });
   t.after(async () => { await server.stop(); });
   const port = await server.start();

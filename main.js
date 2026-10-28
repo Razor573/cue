@@ -14,7 +14,7 @@ const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
 const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
 const { buildInterviewContext, detectCategory } = require('./src/interview-context');
-const { extractCompanyFromJD, generateCompanyDossier } = require('./src/company-dossier');
+const { extractCompanyFromJD, extractCompanyWithLLM, generateCompanyDossier } = require('./src/company-dossier');
 const { createSimpleAutoAnswer, buildJudgePrompt } = require('./src/auto-answer');
 const { createCompanionServer } = require('./src/companion-server');
 let companionServer = null;
@@ -1269,18 +1269,35 @@ ipcMain.handle('codex:logout', () => {
 });
 
 // -------- company dossier IPC --------
-ipcMain.handle('dossier:extract', (_e, jdText) => {
-  return extractCompanyFromJD(jdText);
+ipcMain.handle('dossier:extract', async (_e, jdText) => {
+  const heuristic = extractCompanyFromJD(jdText);
+  if (heuristic && heuristic.company && !heuristic.ambiguous) {
+    return heuristic;
+  }
+  const s = store.getSettings();
+  try {
+    const llm = createLLM(s);
+    return await extractCompanyWithLLM({ jdText, llm, timeoutMs: 4000 });
+  } catch {
+    return heuristic;
+  }
 });
 
 ipcMain.handle('dossier:research', async (_e, { company, jdText } = {}) => {
-  let targetCompany = company;
+  let targetCompany = (company && String(company).trim()) || '';
   if (!targetCompany && jdText) {
-    const extracted = extractCompanyFromJD(jdText);
-    targetCompany = extracted.company;
+    const s = store.getSettings();
+    try {
+      const llm = createLLM(s);
+      const extracted = await extractCompanyWithLLM({ jdText, llm, timeoutMs: 4000 });
+      targetCompany = extracted.company;
+    } catch {
+      const extracted = extractCompanyFromJD(jdText);
+      targetCompany = extracted.company;
+    }
   }
   if (!targetCompany) {
-    throw new Error('No company identified to research.');
+    throw new Error('No company identified to research. Please enter a company name or paste a job description.');
   }
   const s = store.getSettings();
   const dossier = await generateCompanyDossier({
@@ -1355,11 +1372,21 @@ ipcMain.handle('companion:pair-arm', () => {
 });
 
 ipcMain.handle('companion:status', () => {
-  if (!companionServer) return { paired: false, port: null, lastCapturedTitle: null };
+  if (!companionServer) return { paired: false, port: null, lastCapturedTitle: null, pairingString: '' };
   return {
     paired: companionServer.isPaired(),
     port: companionServer.getPort(),
-    lastCapturedTitle: companionServer.getLastCapturedTitle()
+    lastCapturedTitle: companionServer.getLastCapturedTitle(),
+    pairingString: companionServer.getPairingString()
+  };
+});
+
+ipcMain.handle('companion:pairing-string', () => {
+  if (!companionServer) return { ok: false, error: 'Companion server not running' };
+  return {
+    ok: true,
+    port: companionServer.getPort(),
+    pairingString: companionServer.getPairingString()
   };
 });
 

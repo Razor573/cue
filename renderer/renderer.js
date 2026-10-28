@@ -2041,6 +2041,7 @@
     const status = await cue.companionStatus();
     const badge = $('#companion-status-badge');
     const portLabel = $('#companion-port-label');
+    const pairStringInput = $('#companion-pairing-string');
     if (badge) {
       badge.classList.remove('connected', 'armed');
       if (status && status.paired) {
@@ -2052,6 +2053,9 @@
     }
     if (portLabel && status && status.port) {
       portLabel.textContent = `Port: ${status.port}`;
+    }
+    if (pairStringInput && status && status.pairingString) {
+      pairStringInput.value = status.pairingString;
     }
   }
 
@@ -2069,7 +2073,7 @@
       }
       let remaining = 60;
       clearInterval(companionArmTimer);
-      if (statusNote) statusNote.textContent = `Pairing window open (${remaining}s). Click "Pair with Cue" in the Chrome extension.`;
+      if (statusNote) statusNote.textContent = `Pairing window open (${remaining}s). In the Natively or Cue extension popup, click Connect, or copy the pairing string below.`;
       companionArmTimer = setInterval(() => {
         remaining--;
         if (remaining <= 0) {
@@ -2077,9 +2081,31 @@
           if (statusNote) statusNote.textContent = '';
           void refreshCompanionStatus();
         } else if (statusNote) {
-          statusNote.textContent = `Pairing window open (${remaining}s). Click "Pair with Cue" in the Chrome extension.`;
+          statusNote.textContent = `Pairing window open (${remaining}s). In the Natively or Cue extension popup, click Connect, or copy the pairing string below.`;
         }
       }, 1000);
+    });
+  }
+
+  const copyPairBtn = $('#companion-copy-pair-btn');
+  if (copyPairBtn) {
+    copyPairBtn.addEventListener('click', async () => {
+      let str = ($('#companion-pairing-string') && $('#companion-pairing-string').value) || '';
+      if (!str && cue.companionPairingString) {
+        try {
+          const res = await cue.companionPairingString();
+          if (res && res.pairingString) str = res.pairingString;
+        } catch {}
+      }
+      if (!str) return;
+      try {
+        await navigator.clipboard.writeText(str);
+        copyPairBtn.textContent = 'Copied!';
+        setTimeout(() => { copyPairBtn.textContent = 'Copy'; }, 2000);
+      } catch {
+        copyPairBtn.textContent = 'Failed';
+        setTimeout(() => { copyPairBtn.textContent = 'Copy'; }, 2000);
+      }
     });
   }
 
@@ -2589,6 +2615,10 @@
 
     const nameEl = $('#dossier-company-name');
     if (nameEl) nameEl.textContent = dossier.company;
+    const companyInput = $('#dossier-company-input');
+    if (companyInput && !companyInput.value.trim()) {
+      companyInput.value = dossier.company;
+    }
 
     const badge = $('#dossier-badge');
     if (badge) {
@@ -2674,6 +2704,8 @@
       btn.textContent = c;
       btn.addEventListener('click', () => {
         wrap.classList.add('hidden');
+        const companyInput = $('#dossier-company-input');
+        if (companyInput) companyInput.value = c;
         void executeDossierResearch(c, jdText);
       });
       list.appendChild(btn);
@@ -2708,13 +2740,18 @@
   const dossierResearchBtn = $('#dossier-research-btn');
   if (dossierResearchBtn) {
     dossierResearchBtn.addEventListener('click', async () => {
+      const companyInput = ($('#dossier-company-input') && $('#dossier-company-input').value.trim()) || '';
       const jd = ($('#profile-jd') && $('#profile-jd').value.trim()) || '';
       const statusMsg = $('#dossier-status-msg');
-      if (!jd) {
+      if (!companyInput && !jd) {
         if (statusMsg) {
-          statusMsg.textContent = 'Paste a Target Job Description above first.';
+          statusMsg.textContent = 'Enter a company name or paste a Job Description above.';
           statusMsg.style.color = 'var(--amber)';
         }
+        return;
+      }
+      if (companyInput) {
+        await executeDossierResearch(companyInput, jd);
         return;
       }
       if (statusMsg) statusMsg.textContent = 'Extracting company…';
@@ -2722,7 +2759,7 @@
         const extraction = await cue.dossierExtract(jd);
         if (!extraction || !extraction.company) {
           if (statusMsg) {
-            statusMsg.textContent = 'Could not identify a company name from the Job Description.';
+            statusMsg.textContent = 'Could not identify a company name from the Job Description. Please enter the company name above.';
             statusMsg.style.color = 'var(--amber)';
           }
           return;
@@ -2731,6 +2768,9 @@
           showDossierCandidates(extraction.candidates, jd);
           if (statusMsg) statusMsg.textContent = `Multiple candidates found. Select one or research top candidate (${extraction.company}).`;
           return;
+        }
+        if ($('#dossier-company-input')) {
+          $('#dossier-company-input').value = extraction.company;
         }
         await executeDossierResearch(extraction.company, jd);
       } catch (err) {
@@ -2747,6 +2787,7 @@
     dossierClearBtn.addEventListener('click', async () => {
       await cue.dossierClear();
       renderDossierCard(null);
+      if ($('#dossier-company-input')) $('#dossier-company-input').value = '';
       const statusMsg = $('#dossier-status-msg');
       if (statusMsg) statusMsg.textContent = '';
     });
@@ -2755,7 +2796,7 @@
   const dossierRefreshBtn = $('#dossier-refresh-btn');
   if (dossierRefreshBtn) {
     dossierRefreshBtn.addEventListener('click', async () => {
-      const company = ($('#dossier-company-name') && $('#dossier-company-name').textContent) || '';
+      const company = ($('#dossier-company-name') && $('#dossier-company-name').textContent) || ($('#dossier-company-input') && $('#dossier-company-input').value.trim()) || '';
       if (!company) return;
       const jd = ($('#profile-jd') && $('#profile-jd').value.trim()) || '';
       await executeDossierResearch(company, jd);
@@ -2768,6 +2809,9 @@
       if (!profileJdEl.value.trim()) {
         cue.dossierClear().catch(() => {});
         renderDossierCard(null);
+        if ($('#dossier-company-input')) $('#dossier-company-input').value = '';
+        const statusMsg = $('#dossier-status-msg');
+        if (statusMsg) statusMsg.textContent = '';
       }
     });
   }
