@@ -656,6 +656,7 @@ button:focus { outline: none; }
 }
 
 /* Tab panes */
+.s-tab-pane > * { flex-shrink: 0; }
 .s-tab-pane {
   display: flex; flex-direction: column; gap: 8px;
   overflow-y: auto !important; flex: 1; min-height: 0;
@@ -742,7 +743,7 @@ button:focus { outline: none; }
   border-color: rgba(255, 255, 255, 0.2);
   color: transparent;
 }
-.s-field { display: flex; align-items: center; gap: 10px; }
+.s-field { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .s-field span { width: 84px; color: var(--tx-mut); font-size: 12px; flex-shrink: 0; }
 .s-field input, .s-input {
   flex: 1; padding: 7px 10px; border-radius: var(--r-8);
@@ -871,6 +872,9 @@ button:focus { outline: none; }
 .s-action.danger:hover:not(:disabled) { color: var(--red); border-color: rgba(248, 113, 113, 0.38); background: rgba(248, 113, 113, 0.10); }
 
 /* Textareas inside settings */
+#profile-resume { min-height: 95px; }
+#profile-jd { min-height: 80px; }
+#profile-star { min-height: 80px; }
 #settings textarea {
   width: 100%; padding: 7px 10px; border-radius: var(--r-8);
   border: 1px solid var(--border); background: rgba(9, 12, 20, 0.48);
@@ -879,6 +883,7 @@ button:focus { outline: none; }
   -webkit-user-select: text; user-select: text;
   transition: border-color 150ms var(--ease-fluid);
 }
+#settings textarea { flex-shrink: 0; box-sizing: border-box; }
 #settings textarea:focus { border-color: var(--accent); }
 .s-callers { display: flex; flex-direction: column; gap: 6px; }
 .s-caller { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--tx-2); }
@@ -1679,7 +1684,7 @@ button:focus { outline: none; }
 }
 
 /* ============================ Company Dossier ============================ */
-.company-dossier-wrap {
+.company-dossier-wrap { flex-shrink: 0;
   display: flex; flex-direction: column; gap: 8px; margin: 8px 0 14px;
 }
 .dossier-action-bar {
@@ -1702,7 +1707,7 @@ button:focus { outline: none; }
   transition: background 120ms ease;
 }
 .dossier-candidate-btn:hover { background: rgba(91, 138, 245, 0.32); }
-.dossier-card {
+.dossier-card { flex-shrink: 0;
   display: flex; flex-direction: column; gap: 10px;
   padding: 12px; border-radius: 12px;
   background: rgba(20, 26, 42, 0.72);
