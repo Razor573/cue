@@ -14,8 +14,7 @@ const {
   getAntigravityStatus,
   listAntigravityModels,
   resolveAntigravityWireModel,
-  streamAntigravity,
-  askAntigravity
+  streamAntigravity
 } = require('./antigravity');
 const {
   CODEX_MODEL_OPTIONS,
@@ -1440,25 +1439,6 @@ function createLLM(settings, fetchImpl = fetch) {
         if (provider === 'anthropic') {
           return await askAnthropic({ ...args, client: args.client || settings.anthropicClient });
         }
-        if (provider === 'antigravity') {
-          const res = await askAntigravity(
-            {
-              thinkingLevel: settings.antigravityThinkingLevel || (settings.smart ? 'HIGH' : 'LOW'),
-              googleSearch: !!settings.antigravityWebSearch,
-              oauthStorageOptions: settings.oauthStorageOptions
-            },
-            {
-              model,
-              system: args.system,
-              turns: args.turns,
-              imageDataUrl: args.imageDataUrl,
-              maxTokens: args.maxTokens,
-              signal: args.signal
-            },
-            fetchImpl
-          );
-          return res.text;
-        }
         let collected = '';
         const streamed = await this.stream({
           ...params,
@@ -1493,15 +1473,6 @@ const RETIRED_MODEL_MIGRATIONS = {
       [`${prefix}-pro`, prefix.endsWith('2.5') ? 'gemini-3.1-pro-preview' : 'gemini-3-flash-preview'],
       [`${prefix}-pro-preview`, 'gemini-3.1-pro-preview']
     ])
-  ]),
-  antigravity: Object.fromEntries([
-    ...RETIRED_GEMINI_PREFIXES.flatMap((prefix) => [
-      [`${prefix}-flash`, 'gemini-3-flash-preview'],
-      [`${prefix}-flash-lite`, 'gemini-3-flash-preview'],
-      [`${prefix}-pro`, 'gemini-3.1-pro-high']
-    ]),
-    ['gemini-3-flash', 'gemini-3-flash-preview'],
-    ['gemini-3-pro', 'gemini-3.1-pro-high']
   ]),
   openai: {
     'gpt-3.5-turbo': 'gpt-5.4-mini',
@@ -1542,13 +1513,12 @@ function resolveStaticRetiredSuccessor(providerId, modelId, tier = 'fast') {
     return providerMap[id];
   }
 
-  if (p === 'gemini' || !p) {
+  if (p === 'gemini') {
     if (/^gemini-2\.5-pro/i.test(id)) return 'gemini-3.1-pro-preview';
     if (/^gemini-(?:1\.[05]|2\.[05])-/i.test(id)) return 'gemini-3-flash-preview';
   }
-  if (p === 'antigravity' || !p) {
-    if (/^gemini-2\.5-pro/i.test(id) || /^gemini-3-pro$/i.test(id)) return 'gemini-3.1-pro-high';
-    if (/^gemini-2\.5-/i.test(id) || /^gemini-3-flash$/i.test(id)) return 'gemini-3-flash-preview';
+  if (p === 'antigravity') {
+    return null;
   }
   if (p === 'openai' || p === 'azure' || !p) {
     if (/^gpt-3\.5/i.test(id) || /^gpt-4-turbo/i.test(id)) return 'gpt-5.4-mini';
@@ -1603,6 +1573,9 @@ function migrateRetiredModel(providerIdOrModelId, modelIdOrLiveModels, liveModel
   }
 
   const cleanModelId = String(modelId || '').trim();
+  if (String(providerId || '').trim().toLowerCase() === 'antigravity') {
+    return cleanModelId;
+  }
   const normalizedLive = Array.isArray(effectiveLive)
     ? effectiveLive
         .map((m) => {
@@ -1642,9 +1615,12 @@ function migrateRetiredModel(providerIdOrModelId, modelIdOrLiveModels, liveModel
 
 function migrateSettingsModels(settings, providerId = null, liveModels = null) {
   if (!settings || typeof settings !== 'object') return settings;
-  let changed = false;
   const targetProvider = providerId ? String(providerId).trim() : null;
   const activeProvider = targetProvider || String(settings.provider || 'openai').trim();
+  if (targetProvider === 'antigravity' || activeProvider === 'antigravity') {
+    return settings;
+  }
+  let changed = false;
 
   if (typeof settings.fastModel === 'string' && settings.fastModel.trim()) {
     const nextFast = migrateRetiredModel(
@@ -1749,7 +1725,7 @@ function migrateSettingsModels(settings, providerId = null, liveModels = null) {
   return settings;
 }
 
-function mergeCatalogModels(curatedEntry, liveModels = []) {
+function mergeCatalogModels(curatedEntry, liveModels = [], provider = '') {
   const curatedAll = Array.isArray(curatedEntry)
     ? curatedEntry
     : (curatedEntry && Array.isArray(curatedEntry.all) ? curatedEntry.all : []);
@@ -1783,8 +1759,20 @@ function mergeCatalogModels(curatedEntry, liveModels = []) {
     }
   }
 
-  // Live-only when live fetch succeeds and returns models; curated is ONLY a fallback
-  const all = normalizedLive.length > 0 ? normalizedLive : Array.from(curatedById.values());
+  // For antigravity, return exactly the way it was before (curated models preserved, merging any extra live models)
+  let all;
+  if (provider === 'antigravity') {
+    const byId = new Map(curatedById);
+    for (const entry of normalizedLive) {
+      if (!byId.has(entry.id)) {
+        byId.set(entry.id, entry);
+      }
+    }
+    all = Array.from(byId.values());
+  } else {
+    all = normalizedLive.length > 0 ? normalizedLive : Array.from(curatedById.values());
+  }
+
   const fastModels = all.filter((m) => m.tier === 'fast');
   const smartModels = all.filter((m) => m.tier === 'smart');
 
@@ -1940,32 +1928,16 @@ async function listProviderModels(arg1 = {}, arg2 = {}, arg3 = undefined) {
       liveModels = vertexRes.models || [];
       live = liveModels.length > 0;
     } else if (provider === 'antigravity') {
-      const antigravityOpts = {
-        ...(settings.oauthStorageOptions || {}),
-        ...(override.oauthStorageOptions || {}),
-        ...(override.accessToken ? { accessToken: override.accessToken, projectId: override.projectId } : {})
-      };
-      const items = await listAntigravityModels(antigravityOpts, fetchImpl);
-      liveModels = (items || []).map((item) => {
-        if (typeof item === 'string') {
-          const id = item.trim();
-          return {
-            id,
-            label: id,
-            tier: /pro|agent|argon/i.test(id) && !/flash|lite/i.test(id) ? 'smart' : 'fast',
-            wireId: resolveAntigravityWireModel(id)
-          };
-        }
-        const id = String(item.id || '').trim();
+      const ids = await listAntigravityModels(settings.oauthStorageOptions || {}, fetchImpl);
+      liveModels = (ids || []).map((id) => {
+        const cleanId = typeof id === 'string' ? id.trim() : String((id && id.id) || '').trim();
         return {
-          ...item,
-          id,
-          label: item.label || item.name || id,
-          tier: item.tier || (/pro|agent|argon/i.test(id) && !/flash|lite/i.test(id) ? 'smart' : 'fast'),
-          wireId: item.wireId || resolveAntigravityWireModel(id)
+          id: cleanId,
+          label: (id && typeof id === 'object' && id.label) || cleanId,
+          tier: /pro/i.test(cleanId) ? 'smart' : 'fast'
         };
       });
-      live = liveModels.length > 0;
+      live = true;
     } else if (provider === 'codex') {
       liveModels = CODEX_MODEL_OPTIONS.map((m) => ({
         id: m.id,
@@ -2036,7 +2008,7 @@ async function listProviderModels(arg1 = {}, arg2 = {}, arg3 = undefined) {
     warning = (err && err.message) || String(err);
   }
 
-  const merged = mergeCatalogModels(curated, liveModels);
+  const merged = mergeCatalogModels(curated, liveModels, provider);
   const result = {
     ok: true,
     provider,
@@ -2050,7 +2022,9 @@ async function listProviderModels(arg1 = {}, arg2 = {}, arg3 = undefined) {
 
   if (live && merged.models.length > 0) {
     modelCatalogCache.set(cacheKey, { timestamp: now, result });
-    migrateSettingsModels(settings, provider, merged.models);
+    if (provider !== 'antigravity') {
+      migrateSettingsModels(settings, provider, merged.models);
+    }
   }
 
   return result;

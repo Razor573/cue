@@ -589,26 +589,6 @@ async function refreshAntigravityTokens(options = {}) {
 }
 
 async function ensureAntigravitySession(options = {}) {
-  if (options && typeof options.accessToken === 'string' && options.accessToken.trim()) {
-    return {
-      accessToken: options.accessToken.trim(),
-      projectId: options.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID
-    };
-  }
-  const authProvider = (options && typeof options.getValidAccessToken === 'function')
-    ? options
-    : (options && options.auth && typeof options.auth.getValidAccessToken === 'function' ? options.auth : null);
-  if (authProvider) {
-    const authRes = await authProvider.getValidAccessToken();
-    if (!authRes || !authRes.accessToken) {
-      throw new AntigravityError('not_authenticated', 'Sign in with Google in Settings to use Antigravity.', 401);
-    }
-    return {
-      accessToken: authRes.accessToken,
-      projectId: authRes.projectId || options.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID
-    };
-  }
-
   const storageOpts = getStorageOpts(options);
   const fetchImpl = options.fetchImpl || fetch;
   let tokens = getProviderTokens('antigravity', storageOpts);
@@ -650,79 +630,30 @@ function getAntigravityStatus(options = {}) {
   };
 }
 
-const EXCLUDED_ANTIGRAVITY_MODEL_PATTERNS = /image|audio|tts|embed|vision|tab_|chat_20|chat_23|rev19|uic0/i;
-
-function formatAntigravityModelEntry(id, info = {}) {
-  const cleanId = String(id || '').trim().replace(/^models\//i, '');
-  const wireId = resolveAntigravityWireModel(cleanId);
-  const curatedMatch = ANTIGRAVITY_MODEL_OPTIONS.find((m) => m.id === cleanId);
-  const label = info.displayName || info.label || info.name || (curatedMatch && curatedMatch.label) || cleanId;
-  const tier = info.tier || (/pro|agent|argon/i.test(cleanId) && !/flash|lite/i.test(cleanId) ? 'smart' : 'fast');
-  return {
-    id: cleanId,
-    name: label,
-    label,
-    description: info.description || '',
-    tier,
-    wireId
-  };
-}
-
-function attachAntigravityCatalogProps(models, live) {
-  Object.defineProperty(models, 'models', { value: models, enumerable: false, configurable: true });
-  Object.defineProperty(models, 'live', { value: Boolean(live), enumerable: false, configurable: true });
-  return models;
-}
-
-async function fetchAvailableModels(options = {}, fetchImpl = fetch) {
-  const effectiveFetch = (options && typeof options.fetchImpl === 'function') ? options.fetchImpl : fetchImpl;
+async function listAntigravityModels(options = {}, fetchImpl = fetch) {
+  const merged = new Map(ANTIGRAVITY_MODEL_OPTIONS.map((m) => [m.id, m.id]));
   try {
-    const session = options && options.accessToken
-      ? { accessToken: options.accessToken, projectId: options.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID }
-      : await ensureAntigravitySession({ ...options, fetchImpl: effectiveFetch });
-    const res = await effectiveFetch(`${ANTIGRAVITY_DAILY_ENDPOINT}/v1internal:fetchAvailableModels`, {
+    const session = await ensureAntigravitySession({ ...options, fetchImpl });
+    const res = await fetchImpl(`${ANTIGRAVITY_DAILY_ENDPOINT}/v1internal:fetchAvailableModels`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${session.accessToken}`,
         'Content-Type': 'application/json',
         ...ANTIGRAVITY_HEADERS
       },
-      body: JSON.stringify({ project: session.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID })
+      body: JSON.stringify({ project: session.projectId })
     });
     if (res.ok) {
       const data = await res.json();
-      const rawModels = data && data.models;
-      const liveModels = [];
-      const seen = new Set();
-      if (Array.isArray(rawModels)) {
-        for (const item of rawModels) {
-          const id = typeof item === 'string' ? item : (item && (item.id || item.name));
-          const cleanId = String(id || '').trim().replace(/^models\//i, '');
-          if (!cleanId || seen.has(cleanId)) continue;
-          if (!/^gemini/i.test(cleanId) || EXCLUDED_ANTIGRAVITY_MODEL_PATTERNS.test(cleanId)) continue;
-          seen.add(cleanId);
-          liveModels.push(formatAntigravityModelEntry(cleanId, typeof item === 'object' ? item : {}));
+      const models = data && data.models;
+      if (models && typeof models === 'object' && !Array.isArray(models)) {
+        for (const id of Object.keys(models)) {
+          if (/^gemini/i.test(id)) merged.set(id, id);
         }
-      } else if (rawModels && typeof rawModels === 'object') {
-        for (const [id, info] of Object.entries(rawModels)) {
-          const cleanId = String(id || '').trim().replace(/^models\//i, '');
-          if (!cleanId || seen.has(cleanId)) continue;
-          if (!/^gemini/i.test(cleanId) || EXCLUDED_ANTIGRAVITY_MODEL_PATTERNS.test(cleanId)) continue;
-          seen.add(cleanId);
-          liveModels.push(formatAntigravityModelEntry(cleanId, info && typeof info === 'object' ? info : {}));
-        }
-      }
-      if (liveModels.length > 0) {
-        return attachAntigravityCatalogProps(liveModels, true);
       }
     }
   } catch {}
-  const fallback = ANTIGRAVITY_MODEL_OPTIONS.map((m) => formatAntigravityModelEntry(m.id, m));
-  return attachAntigravityCatalogProps(fallback, false);
-}
-
-async function listAntigravityModels(options = {}, fetchImpl = fetch) {
-  return fetchAvailableModels(options, fetchImpl);
+  return Array.from(merged.keys());
 }
 
 function parseDataUrl(imageDataUrl) {
@@ -827,45 +758,25 @@ function buildAntigravityPayload({
 }
 
 async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
-  let effectiveConfig = config || {};
-  let effectiveParams = params || {};
-  let effectiveFetch = fetchImpl;
-  const isSingleObjectCall =
-    typeof params === 'function' ||
-    ((!params || Object.keys(params).length === 0) &&
-      config &&
-      (config.turns !== undefined || config.model !== undefined || config.onToken !== undefined || config.system !== undefined));
+  const storageOpts = getStorageOpts(config);
+  let session = await ensureAntigravitySession({ ...config, oauthStorageOptions: storageOpts, fetchImpl });
 
-  if (isSingleObjectCall) {
-    effectiveConfig = config || {};
-    effectiveParams = config || {};
-    if (typeof params === 'function') effectiveFetch = params;
-    else if (typeof config.fetchImpl === 'function') effectiveFetch = config.fetchImpl;
-  } else if (typeof effectiveConfig.fetchImpl === 'function' && fetchImpl === fetch) {
-    effectiveFetch = effectiveConfig.fetchImpl;
-  } else if (typeof effectiveParams.fetchImpl === 'function' && fetchImpl === fetch) {
-    effectiveFetch = effectiveParams.fetchImpl;
-  }
-
-  const storageOpts = getStorageOpts(effectiveConfig);
-  let session = await ensureAntigravitySession({ ...effectiveConfig, oauthStorageOptions: storageOpts, fetchImpl: effectiveFetch });
-
-  const wireModel = resolveAntigravityWireModel(effectiveParams.model);
+  const wireModel = resolveAntigravityWireModel(params.model);
 
   const buildPayload = (projectId) =>
     buildAntigravityPayload({
       projectId,
-      model: effectiveParams.model,
-      system: effectiveParams.system,
-      turns: effectiveParams.turns,
-      imageDataUrl: effectiveParams.imageDataUrl,
-      maxTokens: effectiveParams.maxTokens,
-      thinkingLevel: effectiveConfig.thinkingLevel || 'LOW',
-      googleSearch: Boolean(effectiveConfig.googleSearch)
+      model: params.model,
+      system: params.system,
+      turns: params.turns,
+      imageDataUrl: params.imageDataUrl,
+      maxTokens: params.maxTokens,
+      thinkingLevel: config.thinkingLevel || 'LOW',
+      googleSearch: Boolean(config.googleSearch)
     });
 
   const sendStreamRequest = (accessToken, projectId) =>
-    effectiveFetch(ANTIGRAVITY_STREAM_URL, {
+    fetchImpl(ANTIGRAVITY_STREAM_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -874,14 +785,14 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
         ...ANTIGRAVITY_HEADERS
       },
       body: JSON.stringify(buildPayload(projectId)),
-      signal: effectiveParams.signal
+      signal: params.signal
     });
 
   let res = await sendStreamRequest(session.accessToken, session.projectId);
 
   if (res.status === 401) {
     try {
-      session = await refreshAntigravityTokens({ ...effectiveConfig, oauthStorageOptions: storageOpts, fetchImpl: effectiveFetch });
+      session = await refreshAntigravityTokens({ ...config, oauthStorageOptions: storageOpts, fetchImpl });
     } catch {
       deleteProviderTokens('antigravity', storageOpts);
       throw new AntigravityError('auth_revoked', ANTIGRAVITY_SESSION_EXPIRED_MESSAGE, 401);
@@ -906,6 +817,7 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
     throw new AntigravityError('stream_error', 'Antigravity returned an empty response body.');
   }
 
+  const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
@@ -922,13 +834,13 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
     const envelope = parsed && parsed.response ? parsed.response : parsed;
     if (envelope && envelope.groundingMetadata && !groundingMetadata) {
       groundingMetadata = envelope.groundingMetadata;
-      if (typeof effectiveParams.onGrounding === 'function') effectiveParams.onGrounding(groundingMetadata);
+      if (typeof params.onGrounding === 'function') params.onGrounding(groundingMetadata);
     }
     const candidates = envelope && Array.isArray(envelope.candidates) ? envelope.candidates : [];
     for (const candidate of candidates) {
       if (candidate && candidate.groundingMetadata && !groundingMetadata) {
         groundingMetadata = candidate.groundingMetadata;
-        if (typeof effectiveParams.onGrounding === 'function') effectiveParams.onGrounding(groundingMetadata);
+        if (typeof params.onGrounding === 'function') params.onGrounding(groundingMetadata);
       }
       const parts = candidate && candidate.content && Array.isArray(candidate.content.parts)
         ? candidate.content.parts
@@ -936,17 +848,19 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
       for (const part of parts) {
         if (!part || typeof part.text !== 'string' || !part.text) continue;
         if (part.thought === true) {
-          if (typeof effectiveParams.onThought === 'function') effectiveParams.onThought(part.text);
+          if (typeof params.onThought === 'function') params.onThought(part.text);
         } else {
           fullText += part.text;
-          if (typeof effectiveParams.onToken === 'function') effectiveParams.onToken(part.text);
+          if (typeof params.onToken === 'function') params.onToken(part.text);
         }
       }
     }
   };
 
-  const processChunkBytes = (value) => {
-    buffer += typeof value === 'string' ? value : decoder.decode(value, { stream: true });
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
     let newlineIndex;
     while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, newlineIndex).trim();
@@ -955,19 +869,6 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
         processEventData(line.slice(5).trim());
       }
     }
-  };
-
-  if (typeof res.body.getReader === 'function') {
-    const reader = res.body.getReader();
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      processChunkBytes(value);
-    }
-  } else if (res.body && typeof res.body[Symbol.asyncIterator] === 'function') {
-    for await (const chunk of res.body) {
-      processChunkBytes(chunk);
-    }
   }
 
   const trailing = buffer.trim();
@@ -975,34 +876,11 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
     processEventData(trailing.slice(5).trim());
   }
 
-  if (isSingleObjectCall) {
-    return fullText;
-  }
-
   return {
     fullText,
     model: wireModel,
     projectId: session.projectId,
     groundingMetadata
-  };
-}
-
-async function askAntigravity(config = {}, params = {}, fetchImpl = fetch) {
-  const isSingleObjectCall =
-    typeof params === 'function' ||
-    ((!params || Object.keys(params).length === 0) &&
-      config &&
-      (config.turns !== undefined || config.model !== undefined || config.onToken !== undefined || config.system !== undefined));
-  const res = await streamAntigravity(config, params, fetchImpl);
-  if (isSingleObjectCall && typeof res === 'string') {
-    return res;
-  }
-  return {
-    text: res.fullText,
-    fullText: res.fullText,
-    model: res.model,
-    projectId: res.projectId,
-    groundingMetadata: res.groundingMetadata
   };
 }
 
@@ -1036,9 +914,7 @@ module.exports = {
   ensureAntigravitySession,
   signOutAntigravity,
   getAntigravityStatus,
-  fetchAvailableModels,
   listAntigravityModels,
   buildAntigravityPayload,
-  streamAntigravity,
-  askAntigravity
+  streamAntigravity
 };

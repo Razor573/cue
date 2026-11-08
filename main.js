@@ -1257,6 +1257,9 @@ async function refreshAndMigrateProviderCatalog(providerId, settingsObj = null, 
   try {
     const s = settingsObj || store.getSettings();
     const targetProvider = providerId || s.provider || 'openai';
+    if (targetProvider === 'antigravity') {
+      return await refreshProviderModelCatalog('antigravity', s, options);
+    }
     const before = JSON.stringify({
       fastModel: s.fastModel,
       smartModel: s.smartModel,
@@ -1292,14 +1295,7 @@ ipcMain.handle('settings:get', () => ({
   antigravityStatus: getAntigravityStatus(),
   codexStatus: getCodexStatus()
 }));
-ipcMain.handle('models:list', async (_e, params = {}) => {
-  const settings = store.getSettings();
-  const res = await listProviderModels(settings, params || {});
-  if (settings._migrated) {
-    store.setSettings({ models: settings.models });
-  }
-  return res;
-});
+ipcMain.handle('models:list', async (_e, params = {}) => listProviderModels(store.getSettings(), params || {}));
 ipcMain.handle('stt:gemini-models', async (_e, params = {}) => {
   const settings = store.getSettings();
   const apiKey = (params && params.apiKey) || settings.apiKeys?.gemini || '';
@@ -2609,7 +2605,9 @@ function launchApp() {
   registerShortcuts();
 
   const initialSettings = store.getSettings();
-  refreshAndMigrateProviderCatalog(initialSettings.provider, initialSettings, { forceRefresh: true }).catch(() => {});
+  if (initialSettings.provider !== 'antigravity') {
+    refreshAndMigrateProviderCatalog(initialSettings.provider, initialSettings, { forceRefresh: true }).catch(() => {});
+  }
 
   if (!companionServer) {
     companionServer = createCompanionServer({
