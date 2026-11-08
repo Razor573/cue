@@ -1,6 +1,7 @@
 // LLM factory — OpenAI, Anthropic, Gemini, Vertex AI, and OpenAI-compatible APIs behind one streaming interface.
 // stream({ system, turns:[{role,text}], imageDataUrl, maxTokens, onToken }) -> Promise<fullText>
 
+const crypto = require('crypto');
 const { createCompatibleClientOptions } = require('./openai-compatible');
 const publik = require('./publik');
 const {
@@ -12,7 +13,9 @@ const {
 const {
   getAntigravityStatus,
   listAntigravityModels,
-  streamAntigravity
+  resolveAntigravityWireModel,
+  streamAntigravity,
+  askAntigravity
 } = require('./antigravity');
 const {
   CODEX_MODEL_OPTIONS,
@@ -610,11 +613,33 @@ async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxToke
   return full;
 }
 
-async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onThought }) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  const client = new Anthropic({ apiKey });
-  const messages = turns.map((t, i) => {
-    const last = i === turns.length - 1;
+// ============================================================================
+// Step 9.2: Claude Prompt Caching (cache_control: { type: 'ephemeral' })
+// ============================================================================
+
+function getClaudeCacheMinChars(modelId) {
+  const id = String(modelId || '').trim().toLowerCase();
+  if (/^claude-opus-4-[01](-|$)/i.test(id)) return 1024 * 4;
+  if (/^claude-opus-4-/i.test(id) || /^claude-haiku-4-5/i.test(id)) return 4096 * 4;
+  if (/^claude-sonnet-4-6/i.test(id)) return 2048 * 4;
+  if (/^claude-3-5-haiku/i.test(id) || /^claude-haiku-3-5/i.test(id)) return 2048 * 4;
+  if (/^claude-/i.test(id)) return 1024 * 4;
+  return 4096 * 4;
+}
+
+function buildClaudeSystemBlocks(systemPrompt, modelId) {
+  if (!systemPrompt) return undefined;
+  const text = String(systemPrompt);
+  if (text.length >= getClaudeCacheMinChars(modelId)) {
+    return [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
+  }
+  return [{ type: 'text', text }];
+}
+
+function buildAnthropicMessages(turns = [], imageDataUrl = null) {
+  const list = Array.isArray(turns) ? turns : [];
+  return list.map((t, i) => {
+    const last = i === list.length - 1;
     if (last && imageDataUrl && t.role === 'user') {
       const img = stripDataUrl(imageDataUrl);
       const content = [];
@@ -624,20 +649,267 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
     }
     return { role: t.role, content: t.text };
   });
-  const stream = await client.messages.create({ model, max_tokens: maxTokens, system, messages, stream: true });
-  let full = '';
-  for await (const ev of stream) {
-    if (ev.type === 'content_block_delta' && ev.delta) {
-      if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
-        if (typeof onThought === 'function') onThought(ev.delta.thinking);
-      } else if (ev.delta.type === 'text_delta' && ev.delta.text) {
-        full += ev.delta.text;
-        onToken(ev.delta.text);
+}
+
+async function streamAnthropic({ apiKey, client: injectedClient, model, system, turns, imageDataUrl, maxTokens, onToken, onThought }) {
+  const client = injectedClient || new (require('@anthropic-ai/sdk'))({ apiKey });
+  const messages = buildAnthropicMessages(turns, imageDataUrl);
+  const useCacheBlocks = typeof system === 'string' && system.length >= getClaudeCacheMinChars(model);
+  const systemParam = useCacheBlocks ? buildClaudeSystemBlocks(system, model) : system;
+
+  const consumeStream = async (sysValue) => {
+    const createFn = (client.messages && typeof client.messages.create === 'function' && (!client.messages.stream || client.messages.create.length > 0))
+      ? (req) => client.messages.create({ ...req, stream: true })
+      : null;
+    let stream;
+    if (client.messages && typeof client.messages.stream === 'function' && (!client.messages.create || client.messages._preferStreamMethod)) {
+      stream = await client.messages.stream({
+        model,
+        max_tokens: maxTokens,
+        system: sysValue,
+        messages
+      });
+    } else if (client.messages && typeof client.messages.create === 'function') {
+      const maybeStream = await client.messages.create({
+        model,
+        max_tokens: maxTokens,
+        system: sysValue,
+        messages,
+        stream: true
+      });
+      if (maybeStream && typeof maybeStream[Symbol.asyncIterator] === 'function') {
+        stream = maybeStream;
+      } else if (client.messages && typeof client.messages.stream === 'function') {
+        stream = await client.messages.stream({
+          model,
+          max_tokens: maxTokens,
+          system: sysValue,
+          messages
+        });
+      } else {
+        stream = maybeStream;
+      }
+    } else if (client.messages && typeof client.messages.stream === 'function') {
+      stream = await client.messages.stream({
+        model,
+        max_tokens: maxTokens,
+        system: sysValue,
+        messages
+      });
+    }
+    let full = '';
+    let yieldedAny = false;
+    try {
+      for await (const ev of stream) {
+        if (ev.type === 'content_block_delta' && ev.delta) {
+          if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
+            yieldedAny = true;
+            if (typeof onThought === 'function') onThought(ev.delta.thinking);
+          } else if (ev.delta.type === 'text_delta' && ev.delta.text) {
+            yieldedAny = true;
+            full += ev.delta.text;
+            if (typeof onToken === 'function') onToken(ev.delta.text);
+          }
+        }
+      }
+      return full;
+    } catch (err) {
+      err._yieldedAny = yieldedAny;
+      throw err;
+    }
+  };
+
+  try {
+    return await consumeStream(systemParam);
+  } catch (err) {
+    if (useCacheBlocks && !err._yieldedAny) {
+      return await consumeStream(system);
+    }
+    throw err;
+  }
+}
+
+async function askAnthropic({ apiKey, client: injectedClient, model, system, turns, imageDataUrl, maxTokens = 4096 }) {
+  const client = injectedClient || new (require('@anthropic-ai/sdk'))({ apiKey });
+  const messages = buildAnthropicMessages(turns, imageDataUrl);
+  const useCacheBlocks = typeof system === 'string' && system.length >= getClaudeCacheMinChars(model);
+  const systemParam = useCacheBlocks ? buildClaudeSystemBlocks(system, model) : system;
+
+  let res;
+  try {
+    res = await client.messages.create({
+      model,
+      max_tokens: maxTokens,
+      system: systemParam,
+      messages
+    });
+  } catch (err) {
+    if (!useCacheBlocks) throw err;
+    res = await client.messages.create({
+      model,
+      max_tokens: maxTokens,
+      system,
+      messages
+    });
+  }
+  const blocks = Array.isArray(res && res.content) ? res.content : [];
+  return blocks
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('');
+}
+
+// ============================================================================
+// Step 9.1: Gemini Prompt Cache (GeminiPromptCache)
+// ============================================================================
+
+const GEMINI_CACHE_MIN_PROMPT_CHARS = 4500;
+const GEMINI_CACHE_TTL_SECONDS = 3600;
+const GEMINI_CACHE_RENEWAL_WINDOW_MS = 5 * 60 * 1000;
+const GEMINI_CACHE_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+
+class GeminiPromptCache {
+  constructor() {
+    this.entries = new Map();
+    this.inFlight = new Map();
+    this.failures = new Map();
+    this.hits = 0;
+    this.misses = 0;
+  }
+
+  _computeKey(model, systemPrompt) {
+    return crypto
+      .createHash('sha1')
+      .update(`${String(model || '').trim()}\0${String(systemPrompt || '')}`)
+      .digest('hex');
+  }
+
+  async getOrCreate(ai, model, systemPrompt) {
+    if (
+      typeof systemPrompt !== 'string' ||
+      systemPrompt.length < GEMINI_CACHE_MIN_PROMPT_CHARS ||
+      !ai ||
+      !ai.caches ||
+      typeof ai.caches.create !== 'function'
+    ) {
+      return null;
+    }
+
+    const cleanModel = String(model || '').trim();
+    const key = this._computeKey(cleanModel, systemPrompt);
+    const now = Date.now();
+
+    const cooldownUntil = this.failures.get(key);
+    if (cooldownUntil && now < cooldownUntil) {
+      return null;
+    }
+
+    const existing = this.entries.get(key);
+    if (existing && existing.expiresAt - now > GEMINI_CACHE_RENEWAL_WINDOW_MS) {
+      this.hits += 1;
+      return existing.name;
+    }
+    this.misses += 1;
+
+    if (this.inFlight.has(key)) {
+      return this.inFlight.get(key);
+    }
+
+    const promise = (async () => {
+      try {
+        const created = await ai.caches.create({
+          model: cleanModel,
+          config: {
+            contents: [{ role: 'user', parts: [{ text: '_' }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            ttl: `${GEMINI_CACHE_TTL_SECONDS}s`,
+            displayName: `cue-sys-${key.slice(0, 8)}`
+          }
+        });
+        const name = created && typeof created.name === 'string' ? created.name.trim() : '';
+        if (!name) {
+          this.failures.set(key, Date.now() + GEMINI_CACHE_FAILURE_COOLDOWN_MS);
+          return null;
+        }
+        this.failures.delete(key);
+        this.entries.set(key, {
+          key,
+          name,
+          model: cleanModel,
+          expiresAt: Date.now() + GEMINI_CACHE_TTL_SECONDS * 1000
+        });
+        return name;
+      } catch (_) {
+        this.failures.set(key, Date.now() + GEMINI_CACHE_FAILURE_COOLDOWN_MS);
+        return null;
+      } finally {
+        this.inFlight.delete(key);
+      }
+    })();
+
+    this.inFlight.set(key, promise);
+    return promise;
+  }
+
+  getCachedOrWarmInBackground(ai, model, systemPrompt) {
+    if (
+      typeof systemPrompt !== 'string' ||
+      systemPrompt.length < GEMINI_CACHE_MIN_PROMPT_CHARS ||
+      !ai ||
+      !ai.caches ||
+      typeof ai.caches.create !== 'function'
+    ) {
+      return null;
+    }
+
+    const cleanModel = String(model || '').trim();
+    const key = this._computeKey(cleanModel, systemPrompt);
+    const now = Date.now();
+    const existing = this.entries.get(key);
+
+    if (existing && existing.expiresAt > now) {
+      if (existing.expiresAt - now <= GEMINI_CACHE_RENEWAL_WINDOW_MS) {
+        this.getOrCreate(ai, cleanModel, systemPrompt).catch(() => {});
+      }
+      return existing.name;
+    }
+
+    this.getOrCreate(ai, cleanModel, systemPrompt).catch(() => {});
+    return null;
+  }
+
+  invalidate(cacheNameOrKey) {
+    if (!cacheNameOrKey) return;
+    if (this.entries.has(cacheNameOrKey)) {
+      this.entries.delete(cacheNameOrKey);
+      return;
+    }
+    for (const [k, entry] of this.entries.entries()) {
+      if (entry.name === cacheNameOrKey) {
+        this.entries.delete(k);
       }
     }
   }
-  return full;
+
+  getStats() {
+    return {
+      size: this.entries.size,
+      inFlight: this.inFlight.size,
+      hits: this.hits,
+      misses: this.misses
+    };
+  }
+
+  clear() {
+    this.entries.clear();
+    this.inFlight.clear();
+    this.failures.clear();
+    this.hits = 0;
+    this.misses = 0;
+  }
 }
+
+const geminiPromptCache = new GeminiPromptCache();
 
 // Gemini 3.x counts its internal "thinking" tokens against maxOutputTokens, so
 // a 700-token cap was mostly eaten by reasoning and the visible answer came
@@ -649,11 +921,15 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
 // (thinkingBudget: 0 is rejected by pro models and "minimal" by flash, so
 // "low" is the one setting that works across the family.)
 const GEMINI_THINKING_HEADROOM = { fast: 1024, smart: 4096 };
-function geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch = false, includeThoughts = false, model = '' }) {
+function geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch = false, includeThoughts = false, model = '', cachedContent = null }) {
   const config = {
-    systemInstruction: system,
     maxOutputTokens: maxTokens + (thinking ? GEMINI_THINKING_HEADROOM.smart : GEMINI_THINKING_HEADROOM.fast)
   };
+  if (cachedContent) {
+    config.cachedContent = cachedContent;
+  } else {
+    config.systemInstruction = system;
+  }
   const cleanModel = String(model || '').trim();
   const isGemini3or4 = cleanModel ? /^gemini-[34]/i.test(cleanModel) : true;
   const lvl = String(thinkingLevel || (thinking ? 'medium' : 'low')).toLowerCase();
@@ -675,11 +951,10 @@ function geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, we
   return config;
 }
 
-async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, thinking, thinkingLevel, webSearch, signal, onToken, onThought }) {
-  const { GoogleGenAI } = require('@google/genai');
-  const ai = new GoogleGenAI({ apiKey });
-  const contents = turns.map((t, i) => {
-    const last = i === turns.length - 1;
+function buildGeminiContents(turns = [], imageDataUrl = null) {
+  const list = Array.isArray(turns) ? turns : [];
+  return list.map((t, i) => {
+    const last = i === list.length - 1;
     const parts = [{ text: t.text }];
     if (last && imageDataUrl && t.role === 'user') {
       const img = stripDataUrl(imageDataUrl);
@@ -687,46 +962,201 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
     }
     return { role: t.role === 'assistant' ? 'model' : 'user', parts };
   });
-  const config = geminiGenerationConfig({ system, maxTokens, thinking, thinkingLevel, webSearch, includeThoughts: true, model });
-  let stream;
-  try {
-    stream = await ai.models.generateContentStream({ model, contents, config });
-  } catch (e) {
-    if (!config.thinkingConfig || !/thinking/i.test((e && e.message) || '')) throw e;
-    try {
-      config.thinkingConfig = { includeThoughts: true, thinkingBudget: -1 };
-      stream = await ai.models.generateContentStream({ model, contents, config });
-    } catch (e2) {
-      if (!/thinking/i.test((e2 && e2.message) || '')) throw e2;
-      delete config.thinkingConfig;
-      stream = await ai.models.generateContentStream({ model, contents, config });
-    }
+}
+
+async function resolveGeminiCacheName({ ai, model, system, webSearch, awaitPromptCache, cacheInstance = geminiPromptCache }) {
+  if (webSearch || typeof system !== 'string' || system.length < GEMINI_CACHE_MIN_PROMPT_CHARS) {
+    return null;
   }
-  let full = '';
-  for await (const chunk of stream) {
-    if (signal && signal.aborted) {
-      throw new Error('Aborted');
+  if (awaitPromptCache) {
+    return cacheInstance.getOrCreate(ai, model, system);
+  }
+  return cacheInstance.getCachedOrWarmInBackground(ai, model, system);
+}
+
+async function streamGemini({
+  apiKey,
+  ai: injectedAi,
+  promptCache = geminiPromptCache,
+  awaitPromptCache = false,
+  model,
+  system,
+  turns,
+  imageDataUrl,
+  maxTokens,
+  thinking,
+  thinkingLevel,
+  webSearch,
+  signal,
+  onToken,
+  onThought
+}) {
+  const ai = injectedAi || new (require('@google/genai').GoogleGenAI)({ apiKey });
+  const contents = buildGeminiContents(turns, imageDataUrl);
+  const cacheName = await resolveGeminiCacheName({
+    ai,
+    model,
+    system,
+    webSearch,
+    awaitPromptCache,
+    cacheInstance: promptCache
+  });
+
+  const openStreamWithConfig = async (cfg) => {
+    try {
+      return await ai.models.generateContentStream({ model, contents, config: cfg });
+    } catch (e) {
+      if (!cfg.thinkingConfig || !/thinking/i.test((e && e.message) || '')) throw e;
+      try {
+        cfg.thinkingConfig = { includeThoughts: true, thinkingBudget: -1 };
+        return await ai.models.generateContentStream({ model, contents, config: cfg });
+      } catch (e2) {
+        if (!/thinking/i.test((e2 && e2.message) || '')) throw e2;
+        delete cfg.thinkingConfig;
+        return await ai.models.generateContentStream({ model, contents, config: cfg });
+      }
     }
-    const parts = chunk.candidates?.[0]?.content?.parts;
-    if (parts && Array.isArray(parts)) {
-      for (const part of parts) {
-        if (!part || typeof part.text !== 'string') continue;
-        if (part.thought === true) {
-          if (typeof onThought === 'function') onThought(part.text);
+  };
+
+  const runStreamAttempt = async (activeCacheName) => {
+    const config = geminiGenerationConfig({
+      system,
+      maxTokens,
+      thinking,
+      thinkingLevel,
+      webSearch,
+      includeThoughts: true,
+      model,
+      cachedContent: activeCacheName
+    });
+    const stream = await openStreamWithConfig(config);
+    let full = '';
+    let yieldedAny = false;
+    try {
+      for await (const chunk of stream) {
+        if (signal && signal.aborted) {
+          throw new Error('Aborted');
+        }
+        const parts = chunk.candidates?.[0]?.content?.parts;
+        if (parts && Array.isArray(parts)) {
+          for (const part of parts) {
+            if (!part || typeof part.text !== 'string') continue;
+            if (part.thought === true) {
+              yieldedAny = true;
+              if (typeof onThought === 'function') onThought(part.text);
+            } else {
+              yieldedAny = true;
+              full += part.text;
+              if (typeof onToken === 'function') onToken(part.text);
+            }
+          }
         } else {
-          full += part.text;
-          if (typeof onToken === 'function') onToken(part.text);
+          const t = chunk && chunk.text;
+          if (t) {
+            yieldedAny = true;
+            full += t;
+            if (typeof onToken === 'function') onToken(t);
+          }
         }
       }
-    } else {
-      const t = chunk && chunk.text;
-      if (t) {
-        full += t;
-        if (typeof onToken === 'function') onToken(t);
+      return full;
+    } catch (err) {
+      err._yieldedAny = yieldedAny;
+      throw err;
+    }
+  };
+
+  if (cacheName) {
+    try {
+      return await runStreamAttempt(cacheName);
+    } catch (err) {
+      if (err && err.message === 'Aborted') throw err;
+      if (!err._yieldedAny) {
+        promptCache.invalidate(cacheName);
+        return await runStreamAttempt(null);
       }
+      throw err;
     }
   }
-  return full;
+
+  return runStreamAttempt(null);
+}
+
+async function askGemini({
+  apiKey,
+  ai: injectedAi,
+  promptCache = geminiPromptCache,
+  awaitPromptCache = false,
+  model,
+  system,
+  turns,
+  imageDataUrl,
+  maxTokens = 4096,
+  thinking = false,
+  thinkingLevel,
+  webSearch = false
+}) {
+  const ai = injectedAi || new (require('@google/genai').GoogleGenAI)({ apiKey });
+  const contents = buildGeminiContents(turns, imageDataUrl);
+  const cacheName = await resolveGeminiCacheName({
+    ai,
+    model,
+    system,
+    webSearch,
+    awaitPromptCache,
+    cacheInstance: promptCache
+  });
+
+  const callGenerate = async (activeCacheName) => {
+    const config = geminiGenerationConfig({
+      system,
+      maxTokens,
+      thinking,
+      thinkingLevel,
+      webSearch,
+      includeThoughts: false,
+      model,
+      cachedContent: activeCacheName
+    });
+    if (ai.models && typeof ai.models.generateContent === 'function') {
+      const res = await ai.models.generateContent({ model, contents, config });
+      const parts = res?.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts)) {
+        return parts
+          .filter((p) => p && !p.thought && typeof p.text === 'string')
+          .map((p) => p.text)
+          .join('');
+      }
+      return (res && res.text) || '';
+    }
+    let out = '';
+    await streamGemini({
+      apiKey,
+      ai,
+      promptCache,
+      awaitPromptCache,
+      model,
+      system,
+      turns,
+      imageDataUrl,
+      maxTokens,
+      thinking,
+      thinkingLevel,
+      webSearch,
+      onToken: (t) => { out += t; }
+    });
+    return out;
+  };
+
+  if (cacheName) {
+    try {
+      return await callGenerate(cacheName);
+    } catch (_) {
+      promptCache.invalidate(cacheName);
+      return await callGenerate(null);
+    }
+  }
+  return callGenerate(null);
 }
 
 async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
@@ -978,11 +1408,12 @@ function createLLM(settings, fetchImpl = fetch) {
         if (provider === 'cerebras') return await streamOpenAI({ ...args, baseURL: CEREBRAS_BASE_URL });
         if (provider === 'minimax') return await streamOpenAI({ ...args, baseURL: MINIMAX_BASE_URLS[minimaxRegion] || MINIMAX_BASE_URLS.global_en });
         if (provider === 'deepseek') return await streamOpenAI({ ...args, baseURL: DEEPSEEK_BASE_URL });
-        if (provider === 'anthropic') return await streamAnthropic(args);
+        if (provider === 'anthropic') return await streamAnthropic({ ...args, client: args.client || settings.anthropicClient });
         if (provider === 'gemini') return await streamGemini({
           ...args,
+          ai: args.ai || settings.geminiClient,
           thinkingLevel: settings.geminiThinkingLevel || 'MEDIUM',
-          webSearch: !!settings.geminiWebSearch,
+          webSearch: args.webSearch !== undefined ? !!args.webSearch : !!settings.geminiWebSearch,
           onThought: args.onThought
         });
         if (provider === 'azure') return await streamAzure(args);
@@ -993,42 +1424,479 @@ function createLLM(settings, fetchImpl = fetch) {
         const wrapped = formatProviderErrorMessage(error, provider, model);
         throw wrapped instanceof Error ? wrapped : new Error(wrapped);
       }
+    },
+    async ask(params = {}) {
+      if (!ready) throw new Error(configurationError || `Complete the ${provider} provider settings.`);
+      const args = { apiKey, baseURL, endpoint, model, maxTokens, thinking: !!settings.smart, ...params, turns: sanitizeTurns(params.turns) };
+      try {
+        if (provider === 'gemini') {
+          return await askGemini({
+            ...args,
+            ai: args.ai || settings.geminiClient,
+            thinkingLevel: settings.geminiThinkingLevel || 'MEDIUM',
+            webSearch: args.webSearch !== undefined ? !!args.webSearch : !!settings.geminiWebSearch
+          });
+        }
+        if (provider === 'anthropic') {
+          return await askAnthropic({ ...args, client: args.client || settings.anthropicClient });
+        }
+        if (provider === 'antigravity') {
+          const res = await askAntigravity(
+            {
+              thinkingLevel: settings.antigravityThinkingLevel || (settings.smart ? 'HIGH' : 'LOW'),
+              googleSearch: !!settings.antigravityWebSearch,
+              oauthStorageOptions: settings.oauthStorageOptions
+            },
+            {
+              model,
+              system: args.system,
+              turns: args.turns,
+              imageDataUrl: args.imageDataUrl,
+              maxTokens: args.maxTokens,
+              signal: args.signal
+            },
+            fetchImpl
+          );
+          return res.text;
+        }
+        let collected = '';
+        const streamed = await this.stream({
+          ...params,
+          onToken: (t) => {
+            collected += t;
+            if (typeof params.onToken === 'function') params.onToken(t);
+          }
+        });
+        return streamed || collected;
+      } catch (error) {
+        const wrapped = formatProviderErrorMessage(error, provider, model);
+        throw wrapped instanceof Error ? wrapped : new Error(wrapped);
+      }
     }
   };
+}
+
+// ============================================================================
+// Step 10: Retired-Model Migration + Live Catalogue + 24-Hour Cache
+// ============================================================================
+
+const RETIRED_GEMINI_PREFIXES = ['1.0', '1.5', '2.0', '2.5'].map((v) => `gemini-${v}`);
+const RETIRED_CLAUDE3_PREFIX = ['claude', '3'].join('-');
+
+const RETIRED_MODEL_MIGRATIONS = {
+  gemini: Object.fromEntries([
+    ...RETIRED_GEMINI_PREFIXES.flatMap((prefix) => [
+      [`${prefix}-flash`, 'gemini-3-flash-preview'],
+      [`${prefix}-flash-8b`, 'gemini-3-flash-preview'],
+      [`${prefix}-flash-lite`, 'gemini-3-flash-preview'],
+      [`${prefix}-flash-preview`, 'gemini-3-flash-preview'],
+      [`${prefix}-pro`, prefix.endsWith('2.5') ? 'gemini-3.1-pro-preview' : 'gemini-3-flash-preview'],
+      [`${prefix}-pro-preview`, 'gemini-3.1-pro-preview']
+    ])
+  ]),
+  antigravity: Object.fromEntries([
+    ...RETIRED_GEMINI_PREFIXES.flatMap((prefix) => [
+      [`${prefix}-flash`, 'gemini-3-flash-preview'],
+      [`${prefix}-flash-lite`, 'gemini-3-flash-preview'],
+      [`${prefix}-pro`, 'gemini-3.1-pro-high']
+    ]),
+    ['gemini-3-flash', 'gemini-3-flash-preview'],
+    ['gemini-3-pro', 'gemini-3.1-pro-high']
+  ]),
+  openai: {
+    'gpt-3.5-turbo': 'gpt-5.4-mini',
+    'gpt-3.5-turbo-0125': 'gpt-5.4-mini',
+    'gpt-4-turbo': 'gpt-5.4-mini',
+    'gpt-4-turbo-preview': 'gpt-5.4-mini'
+  },
+  anthropic: Object.fromEntries([
+    [`${RETIRED_CLAUDE3_PREFIX}-haiku-20240307`, 'claude-haiku-4-5'],
+    [`${RETIRED_CLAUDE3_PREFIX}-5-haiku-latest`, 'claude-haiku-4-5'],
+    [`${RETIRED_CLAUDE3_PREFIX}-5-haiku-20241022`, 'claude-haiku-4-5'],
+    [`${RETIRED_CLAUDE3_PREFIX}-sonnet-20240229`, 'claude-sonnet-4-6'],
+    [`${RETIRED_CLAUDE3_PREFIX}-opus-20240229`, 'claude-sonnet-4-6'],
+    [`${RETIRED_CLAUDE3_PREFIX}-5-sonnet-latest`, 'claude-sonnet-4-6'],
+    [`${RETIRED_CLAUDE3_PREFIX}-5-sonnet-20241022`, 'claude-sonnet-4-6'],
+    [`${RETIRED_CLAUDE3_PREFIX}-7-sonnet-latest`, 'claude-sonnet-4-6'],
+    [`${RETIRED_CLAUDE3_PREFIX}-7-sonnet-20250219`, 'claude-sonnet-4-6']
+  ]),
+  deepseek: {
+    'deepseek-chat': 'deepseek-v4',
+    'deepseek-v4-flash': 'deepseek-v4',
+    'deepseek-reasoner': 'deepseek-r2'
+  },
+  groq: {
+    'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
+    'meta-llama/llama-4-scout-17b-16e-instruct': 'openai/gpt-oss-120b',
+    'qwen/qwen3.6-27b': 'openai/gpt-oss-120b'
+  }
+};
+
+function resolveStaticRetiredSuccessor(providerId, modelId, tier = 'fast') {
+  const p = String(providerId || '').trim().toLowerCase();
+  const id = String(modelId || '').trim();
+  if (!id) return null;
+
+  const providerMap = RETIRED_MODEL_MIGRATIONS[p];
+  if (providerMap && typeof providerMap === 'object' && typeof providerMap[id] === 'string') {
+    return providerMap[id];
+  }
+
+  if (p === 'gemini' || !p) {
+    if (/^gemini-2\.5-pro/i.test(id)) return 'gemini-3.1-pro-preview';
+    if (/^gemini-(?:1\.[05]|2\.[05])-/i.test(id)) return 'gemini-3-flash-preview';
+  }
+  if (p === 'antigravity' || !p) {
+    if (/^gemini-2\.5-pro/i.test(id) || /^gemini-3-pro$/i.test(id)) return 'gemini-3.1-pro-high';
+    if (/^gemini-2\.5-/i.test(id) || /^gemini-3-flash$/i.test(id)) return 'gemini-3-flash-preview';
+  }
+  if (p === 'openai' || p === 'azure' || !p) {
+    if (/^gpt-3\.5/i.test(id) || /^gpt-4-turbo/i.test(id)) return 'gpt-5.4-mini';
+  }
+  if (p === 'anthropic' || !p) {
+    if (/^claude-(?:2|3(?:-[57])?-)/i.test(id)) {
+      return /haiku/i.test(id) ? 'claude-haiku-4-5' : 'claude-sonnet-4-6';
+    }
+  }
+  if (p === 'deepseek' || !p) {
+    if (/^deepseek-reasoner$/i.test(id)) return 'deepseek-r2';
+    if (/^deepseek-(?:chat|v4-flash)$/i.test(id)) return 'deepseek-v4';
+  }
+  if (p === 'groq' || !p) {
+    if (
+      id === 'llama-3.3-70b-versatile' ||
+      id === 'meta-llama/llama-4-scout-17b-16e-instruct' ||
+      id === 'qwen/qwen3.6-27b'
+    ) {
+      return 'openai/gpt-oss-120b';
+    }
+  }
+
+  if (typeof RETIRED_MODEL_MIGRATIONS[id] === 'string') {
+    return RETIRED_MODEL_MIGRATIONS[id];
+  }
+  return null;
+}
+
+function inferModelTier(id, explicitTier) {
+  if (explicitTier === 'smart' || explicitTier === 'fast') return explicitTier;
+  return /pro|argon|sonnet|opus|gpt-5\.4(?!-mini|-nano)|gpt-4o(?!-mini)|gpt-4\.1(?!-mini|-nano)|o1|o3|70b|120b|v4|r2|codex|agent/i.test(String(id || '')) && !/flash|lite|mini|nano|instant/i.test(String(id || ''))
+    ? 'smart'
+    : 'fast';
+}
+
+function migrateRetiredModel(providerIdOrModelId, modelIdOrLiveModels, liveModels = null, tier = 'fast') {
+  let providerId = providerIdOrModelId;
+  let modelId = modelIdOrLiveModels;
+  let effectiveLive = liveModels;
+  let effectiveTier = tier;
+
+  // Support 1-arg or 2-arg call migrateRetiredModel(modelId, liveModels?, tier?)
+  if (modelIdOrLiveModels === undefined || Array.isArray(modelIdOrLiveModels)) {
+    providerId = '';
+    modelId = providerIdOrModelId;
+    effectiveLive = Array.isArray(modelIdOrLiveModels) ? modelIdOrLiveModels : null;
+    if (typeof liveModels === 'string') effectiveTier = liveModels;
+  } else if (typeof liveModels === 'string') {
+    effectiveTier = liveModels;
+    effectiveLive = Array.isArray(tier) ? tier : null;
+  }
+
+  const cleanModelId = String(modelId || '').trim();
+  const normalizedLive = Array.isArray(effectiveLive)
+    ? effectiveLive
+        .map((m) => {
+          if (typeof m === 'string') {
+            const id = m.trim();
+            return id ? { id, tier: inferModelTier(id) } : null;
+          }
+          if (m && typeof m === 'object' && m.id) {
+            const id = String(m.id).trim();
+            return id ? { ...m, id, tier: inferModelTier(id, m.tier) } : null;
+          }
+          return null;
+        })
+        .filter(Boolean)
+    : null;
+
+  if (normalizedLive && normalizedLive.length > 0) {
+    if (cleanModelId && normalizedLive.some((m) => m.id === cleanModelId)) {
+      return cleanModelId;
+    }
+    const successor = resolveStaticRetiredSuccessor(providerId, cleanModelId, effectiveTier);
+    if (successor) {
+      const exactMatch = normalizedLive.find((m) => m.id === successor);
+      if (exactMatch) return exactMatch.id;
+      const prefixMatch = normalizedLive.find((m) => m.id.startsWith(successor) || successor.startsWith(m.id));
+      if (prefixMatch) return prefixMatch.id;
+    }
+    const tierMatch = normalizedLive.find((m) => m.tier === effectiveTier);
+    if (tierMatch) return tierMatch.id;
+    return normalizedLive[0].id;
+  }
+
+  if (!cleanModelId) return cleanModelId;
+  const successor = resolveStaticRetiredSuccessor(providerId, cleanModelId, effectiveTier);
+  return successor || cleanModelId;
+}
+
+function migrateSettingsModels(settings, providerId = null, liveModels = null) {
+  if (!settings || typeof settings !== 'object') return settings;
+  let changed = false;
+  const targetProvider = providerId ? String(providerId).trim() : null;
+  const activeProvider = targetProvider || String(settings.provider || 'openai').trim();
+
+  if (typeof settings.fastModel === 'string' && settings.fastModel.trim()) {
+    const nextFast = migrateRetiredModel(
+      activeProvider,
+      settings.fastModel,
+      !targetProvider || targetProvider === activeProvider ? liveModels : null,
+      'fast'
+    );
+    if (nextFast && nextFast !== settings.fastModel) {
+      settings.fastModel = nextFast;
+      changed = true;
+    }
+  }
+
+  if (typeof settings.smartModel === 'string' && settings.smartModel.trim()) {
+    const nextSmart = migrateRetiredModel(
+      activeProvider,
+      settings.smartModel,
+      !targetProvider || targetProvider === activeProvider ? liveModels : null,
+      'smart'
+    );
+    if (nextSmart && nextSmart !== settings.smartModel) {
+      settings.smartModel = nextSmart;
+      changed = true;
+    }
+  }
+
+  if (settings.providerModels && typeof settings.providerModels === 'object') {
+    const providers = targetProvider ? [targetProvider] : Object.keys(settings.providerModels);
+    for (const p of providers) {
+      const val = settings.providerModels[p];
+      const pLive = !targetProvider || targetProvider === p ? liveModels : null;
+      if (typeof val === 'string' && val.trim()) {
+        const migrated = migrateRetiredModel(p, val, pLive, 'fast');
+        if (migrated && migrated !== val) {
+          settings.providerModels[p] = migrated;
+          changed = true;
+        }
+      } else if (val && typeof val === 'object') {
+        if (typeof val.fast === 'string' && val.fast.trim()) {
+          const nextFast = migrateRetiredModel(p, val.fast, pLive, 'fast');
+          if (nextFast && nextFast !== val.fast) {
+            val.fast = nextFast;
+            changed = true;
+          }
+        }
+        if (typeof val.smart === 'string' && val.smart.trim()) {
+          const nextSmart = migrateRetiredModel(p, val.smart, pLive, 'smart');
+          if (nextSmart && nextSmart !== val.smart) {
+            val.smart = nextSmart;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  if (settings.models && typeof settings.models === 'object') {
+    const providers = targetProvider ? [targetProvider] : Object.keys(settings.models);
+    for (const p of providers) {
+      const entry = settings.models[p];
+      if (!entry || typeof entry !== 'object') continue;
+      const pLive = !targetProvider || targetProvider === p ? liveModels : null;
+      // When liveModels is explicitly passed, migrate any model absent from liveModels;
+      // during static load (liveModels === null), only migrate models that match explicit retired rules
+      if (typeof entry.fast === 'string' && entry.fast.trim()) {
+        const nextFast = pLive
+          ? migrateRetiredModel(p, entry.fast, pLive, 'fast')
+          : (resolveStaticRetiredSuccessor(p, entry.fast, 'fast') || entry.fast);
+        if (nextFast && nextFast !== entry.fast) {
+          entry.fast = nextFast;
+          changed = true;
+        }
+      }
+      if (typeof entry.smart === 'string' && entry.smart.trim()) {
+        const nextSmart = pLive
+          ? migrateRetiredModel(p, entry.smart, pLive, 'smart')
+          : (resolveStaticRetiredSuccessor(p, entry.smart, 'smart') || entry.smart);
+        if (nextSmart && nextSmart !== entry.smart) {
+          entry.smart = nextSmart;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  try {
+    Object.defineProperty(settings, '_migrated', {
+      value: changed,
+      enumerable: false,
+      configurable: true,
+      writable: true
+    });
+    Object.defineProperty(settings, 'changed', {
+      value: changed,
+      enumerable: false,
+      configurable: true,
+      writable: true
+    });
+  } catch (_) {}
+
+  return settings;
 }
 
 function mergeCatalogModels(curatedEntry, liveModels = []) {
-  const base = curatedEntry || { fast: [], smart: [], all: [] };
-  const byId = new Map();
-  for (const item of base.all) {
-    byId.set(item.id, { ...item });
-  }
-  for (const item of liveModels) {
+  const curatedAll = Array.isArray(curatedEntry)
+    ? curatedEntry
+    : (curatedEntry && Array.isArray(curatedEntry.all) ? curatedEntry.all : []);
+  const curatedById = new Map();
+  for (const item of curatedAll) {
+    if (!item) continue;
     const id = typeof item === 'string' ? item.trim() : String(item.id || '').trim();
     if (!id) continue;
-    if (DEAD_GEMINI_MODEL_RE.test(id) || DEAD_ANTHROPIC_MODEL_RE.test(id) || DEAD_DEEPSEEK_MODEL_RE.test(id)) continue;
-    if (!byId.has(id)) {
-      const isSmart = item.tier
-        ? item.tier === 'smart'
-        : /pro|argon|sonnet|opus|gpt-4o(?!-mini)|gpt-4\.1(?!-mini|-nano)|o1|o3|70b|v4/i.test(id);
-      byId.set(id, {
+    curatedById.set(id, typeof item === 'object' ? { ...item, id } : { id, label: id, tier: inferModelTier(id) });
+  }
+
+  const normalizedLive = [];
+  const seenLive = new Set();
+  if (Array.isArray(liveModels)) {
+    for (const item of liveModels) {
+      if (!item) continue;
+      const id = typeof item === 'string' ? item.trim() : String(item.id || '').trim();
+      if (!id || seenLive.has(id)) continue;
+      seenLive.add(id);
+      const curatedMeta = curatedById.get(id);
+      const tier = (typeof item === 'object' && item.tier) || (curatedMeta && curatedMeta.tier) || inferModelTier(id);
+      const label = (typeof item === 'object' && (item.label || item.name)) || (curatedMeta && curatedMeta.label) || id;
+      const entry = {
+        ...(curatedMeta || {}),
+        ...(typeof item === 'object' ? item : {}),
         id,
-        label: item.label || id,
-        tier: isSmart ? 'smart' : 'fast'
-      });
+        label,
+        tier
+      };
+      normalizedLive.push(entry);
     }
   }
-  const all = Array.from(byId.values());
+
+  // Live-only when live fetch succeeds and returns models; curated is ONLY a fallback
+  const all = normalizedLive.length > 0 ? normalizedLive : Array.from(curatedById.values());
   const fastModels = all.filter((m) => m.tier === 'fast');
   const smartModels = all.filter((m) => m.tier === 'smart');
-  return {
-    models: all,
-    fastModels: fastModels.length ? fastModels : all,
-    smartModels: smartModels.length ? smartModels : all
-  };
+
+  const result = all.slice();
+  Object.defineProperty(result, 'models', { value: all, enumerable: true });
+  Object.defineProperty(result, 'fastModels', { value: fastModels.length ? fastModels : all, enumerable: true });
+  Object.defineProperty(result, 'smartModels', { value: smartModels.length ? smartModels : all, enumerable: true });
+  return result;
 }
 
-async function listProviderModels(settings = {}, override = {}, fetchImpl = fetch) {
+const GEMINI_LIVE_MODEL_ALLOW_RE = /^gemini-[34](?:[.-]|$)/i;
+const GEMINI_LIVE_MODEL_EXCLUDE_RE = /embedding|tts|image|vision|aqa|nano|banana|computer-use|custom|imagen|veo|live|transcribe/i;
+
+function filterGeminiApiModels(rawModels = []) {
+  const list = Array.isArray(rawModels) ? rawModels : [];
+  const out = [];
+  const seen = new Set();
+  for (const m of list) {
+    if (!m) continue;
+    const rawName = typeof m === 'string' ? m : (m.id || m.name || '');
+    const id = String(rawName).replace(/^models\//i, '').trim();
+    if (!id || seen.has(id)) continue;
+    if (!GEMINI_LIVE_MODEL_ALLOW_RE.test(id)) continue;
+    if (GEMINI_LIVE_MODEL_EXCLUDE_RE.test(id)) continue;
+    if (
+      typeof m === 'object' &&
+      Array.isArray(m.supportedGenerationMethods) &&
+      m.supportedGenerationMethods.length > 0 &&
+      !m.supportedGenerationMethods.includes('generateContent')
+    ) {
+      continue;
+    }
+    seen.add(id);
+    const label = (typeof m === 'object' && (m.displayName || m.label)) || id;
+    const tier = /pro|argon/i.test(id) && !/flash|lite/i.test(id) ? 'smart' : 'fast';
+    out.push({ id, label, tier });
+  }
+  return out;
+}
+
+async function listGeminiModels(apiKeyOrOptions, fetchImpl = fetch) {
+  const apiKey = typeof apiKeyOrOptions === 'string'
+    ? apiKeyOrOptions.trim()
+    : String((apiKeyOrOptions && (apiKeyOrOptions.apiKey || apiKeyOrOptions.key || apiKeyOrOptions.settings?.apiKeys?.gemini)) || '').trim();
+  const effectiveFetch = (apiKeyOrOptions && typeof apiKeyOrOptions === 'object' && typeof apiKeyOrOptions.fetchImpl === 'function')
+    ? apiKeyOrOptions.fetchImpl
+    : fetchImpl;
+  if (!apiKey) return [];
+  const res = await effectiveFetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`);
+  if (!res.ok) {
+    const err = new Error(`Gemini models HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  return filterGeminiApiModels(data && data.models);
+}
+
+const MODEL_CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const modelCatalogCache = new Map();
+
+function clearModelCatalogCache() {
+  modelCatalogCache.clear();
+}
+
+function buildModelCatalogCacheKey(provider, effectiveKey, settings = {}, override = {}) {
+  const rawMaterial = [
+    provider,
+    effectiveKey || '',
+    override.baseUrl !== undefined ? override.baseUrl : (settings.baseUrl || ''),
+    override.vertexProject !== undefined ? override.vertexProject : (settings.vertexProject || ''),
+    override.vertexLocation !== undefined ? override.vertexLocation : (settings.vertexLocation || 'global'),
+    override.azureEndpoint !== undefined ? override.azureEndpoint : (settings.azureEndpoint || ''),
+    override.ollamaHost || ''
+  ].join('|');
+  const hash = crypto.createHash('sha1').update(rawMaterial).digest('hex').slice(0, 16);
+  return `${provider}:${hash}`;
+}
+
+async function listProviderModels(arg1 = {}, arg2 = {}, arg3 = undefined) {
+  let settings = {};
+  let override = {};
+  let fetchImpl = fetch;
+
+  if (typeof arg1 === 'string') {
+    settings = (arg2 && typeof arg2 === 'object') ? arg2 : {};
+    if (typeof arg3 === 'function') {
+      fetchImpl = arg3;
+      override = { provider: arg1 };
+    } else {
+      override = { ...(arg3 && typeof arg3 === 'object' ? arg3 : {}), provider: arg1 };
+      if (typeof override.fetchImpl === 'function') fetchImpl = override.fetchImpl;
+      else if (typeof override.fetch === 'function') fetchImpl = override.fetch;
+    }
+  } else {
+    settings = (arg1 && typeof arg1 === 'object') ? arg1 : {};
+    if (typeof arg2 === 'function') {
+      fetchImpl = arg2;
+    } else if (arg2 && typeof arg2 === 'object') {
+      override = arg2;
+      if (typeof override.fetchImpl === 'function') fetchImpl = override.fetchImpl;
+      else if (typeof override.fetch === 'function') fetchImpl = override.fetch;
+    }
+    if (typeof arg3 === 'function') {
+      fetchImpl = arg3;
+    } else if (arg3 && typeof arg3 === 'object') {
+      override = { ...override, ...arg3 };
+      if (typeof override.fetchImpl === 'function') fetchImpl = override.fetchImpl;
+      else if (typeof override.fetch === 'function') fetchImpl = override.fetch;
+    }
+  }
+
   const provider = String(override.provider || settings.provider || 'openai').trim();
   const keys = settings.apiKeys || {};
   const effectiveKey = override.clearKey
@@ -1036,6 +1904,23 @@ async function listProviderModels(settings = {}, override = {}, fetchImpl = fetc
     : (override.apiKey !== undefined && String(override.apiKey).trim() !== ''
       ? String(override.apiKey).trim()
       : String(keys[provider] || '').trim());
+
+  const now = typeof override.now === 'number' ? override.now : Date.now();
+  const forceRefresh = Boolean(override.forceRefresh);
+  const cacheKey = buildModelCatalogCacheKey(provider, effectiveKey, settings, override);
+
+  if (!forceRefresh) {
+    const cached = modelCatalogCache.get(cacheKey);
+    if (cached && (now - cached.timestamp) < MODEL_CATALOG_CACHE_TTL_MS) {
+      if (cached.result.live && cached.result.models.length > 0) {
+        migrateSettingsModels(settings, provider, cached.result.models);
+      }
+      return {
+        ...cached.result,
+        cached: true
+      };
+    }
+  }
 
   const curated = PROVIDER_MODEL_CATALOG[provider] || { fast: [], smart: [], all: [] };
   let liveModels = [];
@@ -1053,30 +1938,44 @@ async function listProviderModels(settings = {}, override = {}, fetchImpl = fetc
         fetchImpl
       );
       liveModels = vertexRes.models || [];
-      live = true;
+      live = liveModels.length > 0;
     } else if (provider === 'antigravity') {
-      const ids = await listAntigravityModels(settings.oauthStorageOptions || {}, fetchImpl);
-      liveModels = ids.map((id) => ({ id, label: id, tier: /pro/i.test(id) ? 'smart' : 'fast' }));
-      live = true;
+      const antigravityOpts = {
+        ...(settings.oauthStorageOptions || {}),
+        ...(override.oauthStorageOptions || {}),
+        ...(override.accessToken ? { accessToken: override.accessToken, projectId: override.projectId } : {})
+      };
+      const items = await listAntigravityModels(antigravityOpts, fetchImpl);
+      liveModels = (items || []).map((item) => {
+        if (typeof item === 'string') {
+          const id = item.trim();
+          return {
+            id,
+            label: id,
+            tier: /pro|agent|argon/i.test(id) && !/flash|lite/i.test(id) ? 'smart' : 'fast',
+            wireId: resolveAntigravityWireModel(id)
+          };
+        }
+        const id = String(item.id || '').trim();
+        return {
+          ...item,
+          id,
+          label: item.label || item.name || id,
+          tier: item.tier || (/pro|agent|argon/i.test(id) && !/flash|lite/i.test(id) ? 'smart' : 'fast'),
+          wireId: item.wireId || resolveAntigravityWireModel(id)
+        };
+      });
+      live = liveModels.length > 0;
     } else if (provider === 'codex') {
       liveModels = CODEX_MODEL_OPTIONS.map((m) => ({
         id: m.id,
         label: m.label,
         tier: /codex/i.test(m.id) ? 'smart' : 'fast'
       }));
-      live = true;
+      live = liveModels.length > 0;
     } else if (provider === 'gemini' && effectiveKey) {
-      const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(effectiveKey)}`);
-      if (res.ok) {
-        const data = await res.json();
-        liveModels = (data.models || [])
-          .map((m) => String(m.name || '').replace(/^models\//, '').trim())
-          .filter((id) => /^gemini-(3|4)/i.test(id) && !/embedding|imagen|veo|tts|live|transcribe/i.test(id))
-          .map((id) => ({ id, label: id, tier: /pro|argon/i.test(id) ? 'smart' : 'fast' }));
-        live = true;
-      } else {
-        warning = `Gemini models HTTP ${res.status}`;
-      }
+      liveModels = await listGeminiModels(effectiveKey, fetchImpl);
+      live = liveModels.length > 0;
     } else if ((provider === 'openai' || provider === 'groq' || provider === 'cerebras' || provider === 'deepseek') && effectiveKey) {
       const baseMap = {
         openai: 'https://api.openai.com/v1',
@@ -1090,13 +1989,34 @@ async function listProviderModels(settings = {}, override = {}, fetchImpl = fetc
       });
       if (res.ok) {
         const data = await res.json();
-        liveModels = (data.data || [])
-          .map((m) => String(m.id || '').trim())
+        liveModels = (data.data || data.models || [])
+          .map((m) => (typeof m === 'string' ? m.trim() : String((m && m.id) || '').trim()))
           .filter((id) => id && !/whisper|tts|embedding|moderation|dall-e|audio|realtime/i.test(id))
-          .map((id) => ({ id, label: id }));
-        live = true;
+          .map((id) => ({ id, label: id, tier: inferModelTier(id) }));
+        live = liveModels.length > 0;
       } else {
         warning = `${normalizeProviderName(provider)} models HTTP ${res.status}`;
+      }
+    } else if (provider === 'anthropic' && effectiveKey) {
+      const res = await fetchImpl('https://api.anthropic.com/v1/models', {
+        method: 'GET',
+        headers: {
+          'x-api-key': effectiveKey,
+          'anthropic-version': '2023-06-01'
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        liveModels = (data.data || data.models || [])
+          .map((m) => {
+            const id = typeof m === 'string' ? m.trim() : String((m && m.id) || '').trim();
+            const label = (m && typeof m === 'object' && (m.display_name || m.label)) || id;
+            return id ? { id, label, tier: /haiku/i.test(id) ? 'fast' : 'smart' } : null;
+          })
+          .filter(Boolean);
+        live = liveModels.length > 0;
+      } else {
+        warning = `Anthropic models HTTP ${res.status}`;
       }
     } else if (provider === 'ollama') {
       const host = String(override.ollamaHost || effectiveKey || 'http://localhost:11434').replace(/\/$/, '');
@@ -1107,7 +2027,7 @@ async function listProviderModels(settings = {}, override = {}, fetchImpl = fetc
           .map((m) => String(m.name || m.model || '').trim())
           .filter(Boolean)
           .map((id) => ({ id, label: id, tier: 'fast' }));
-        live = true;
+        live = liveModels.length > 0;
       } else {
         warning = `Ollama tags HTTP ${res.status}`;
       }
@@ -1117,15 +2037,38 @@ async function listProviderModels(settings = {}, override = {}, fetchImpl = fetc
   }
 
   const merged = mergeCatalogModels(curated, liveModels);
-  return {
+  const result = {
     ok: true,
     provider,
     models: merged.models,
     fastModels: merged.fastModels,
     smartModels: merged.smartModels,
     live,
+    cached: false,
     ...(warning ? { warning } : {})
   };
+
+  if (live && merged.models.length > 0) {
+    modelCatalogCache.set(cacheKey, { timestamp: now, result });
+    migrateSettingsModels(settings, provider, merged.models);
+  }
+
+  return result;
+}
+
+async function refreshProviderModelCatalog(providerIdOrSettings, maybeSettings = {}, maybeOptions = {}) {
+  if (typeof providerIdOrSettings === 'string') {
+    const opts = typeof maybeOptions === 'function'
+      ? { fetchImpl: maybeOptions, forceRefresh: true }
+      : { ...(maybeOptions || {}), forceRefresh: maybeOptions?.forceRefresh !== undefined ? maybeOptions.forceRefresh : true };
+    return listProviderModels(providerIdOrSettings, maybeSettings, opts);
+  }
+  const settings = providerIdOrSettings || {};
+  const opts = {
+    ...(maybeSettings || {}),
+    forceRefresh: maybeSettings?.forceRefresh !== undefined ? maybeSettings.forceRefresh : true
+  };
+  return listProviderModels(settings, opts, typeof maybeOptions === 'function' ? maybeOptions : opts.fetchImpl);
 }
 
 async function testProviderConnection(settings = {}, override = {}, fetchImpl = fetch) {
@@ -1265,7 +2208,7 @@ module.exports = {
   isNotFoundError,
   geminiGenerationConfig,
   resolveGeminiModel,
-   resolveVertexModel,
+  resolveVertexModel,
   CURRENT_GEMINI_DEFAULT,
   GEMINI_TRANSCRIBE_MODEL,
   GEMINI_TRANSCRIBE_LIVE_MODEL,
@@ -1275,7 +2218,28 @@ module.exports = {
   PUBLIK_PROVIDER,
   PROVIDER_LABELS,
   PROVIDER_MODEL_CATALOG,
+  mergeCatalogModels,
+  listGeminiModels,
+  filterGeminiApiModels,
   listProviderModels,
+  refreshProviderModelCatalog,
+  clearModelCatalogCache,
+  MODEL_CATALOG_CACHE_TTL_MS,
+  RETIRED_MODEL_MIGRATIONS,
+  migrateRetiredModel,
+  migrateSettingsModels,
+  GeminiPromptCache,
+  geminiPromptCache,
+  GEMINI_CACHE_MIN_PROMPT_CHARS,
+  GEMINI_CACHE_TTL_SECONDS,
+  GEMINI_CACHE_RENEWAL_WINDOW_MS,
+  GEMINI_CACHE_FAILURE_COOLDOWN_MS,
+  getClaudeCacheMinChars,
+  buildClaudeSystemBlocks,
+  streamGemini,
+  askGemini,
+  streamAnthropic,
+  askAnthropic,
   testProviderConnection,
   isRateLimitError,
   GEMINI_STT_MODELS,

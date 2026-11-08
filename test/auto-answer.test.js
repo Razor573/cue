@@ -8,8 +8,25 @@ const {
   evaluateQuestionCandidate,
   createAutoAnswerController,
   createSimpleAutoAnswer,
+  AutoAnswerEngine,
   tokenContainment,
-  normalizeForCompare
+  normalizeForCompare,
+  isSameUtterance,
+  STABILITY_MS,
+  EARLY_JUDGE_MS,
+  ENDPOINT_CONFIRM_MS,
+  STALL_PROMOTE_MS,
+  JUDGE_CONTAINMENT_MIN,
+  AUTO_DISPATCH_THRESHOLD,
+  DISPATCH_THRESHOLD,
+  OFFER_THRESHOLD,
+  JUDGE_ACTS,
+  JUDGE_ACTIONS,
+  JUDGE_PROMPT_INTRO,
+  JUDGE_PROMPT_RULES,
+  buildJudgePrompt,
+  parseJudgeVerdict,
+  routeForVerdict
 } = require('../src/auto-answer');
 
 function createFakeClock() {
@@ -516,5 +533,425 @@ test('SimpleAutoAnswer engine handles prefilters, fast model judging, fallbacks,
     const log = auto.getDecisionLog();
     assert.equal(log[log.length - 1].verdict, 'silent');
     assert.equal(log[log.length - 1].reason, 'engine_busy');
+  });
+});
+
+// ==================== Section 3: Step 2 & Step 3 Tests ====================
+
+test('Judge prompt rules corpus, rich verdict schema, and grounding validation (Step 2)', async (t) => {
+  await t.test('exports constants, thresholds, acts, and actions intact', () => {
+    assert.equal(STABILITY_MS, 900);
+    assert.equal(EARLY_JUDGE_MS, 120);
+    assert.equal(ENDPOINT_CONFIRM_MS, 350);
+    assert.equal(STALL_PROMOTE_MS, 2000);
+    assert.equal(JUDGE_CONTAINMENT_MIN, 0.65);
+    assert.equal(AUTO_DISPATCH_THRESHOLD, 0.88);
+    assert.equal(DISPATCH_THRESHOLD, 0.88);
+    assert.equal(OFFER_THRESHOLD, 0.65);
+    assert.deepEqual(JUDGE_ACTS, [
+      'question',
+      'follow_up',
+      'coding_task',
+      'behavioral',
+      'technical',
+      'rhetorical',
+      'statement',
+      'social',
+      'incomplete'
+    ]);
+    assert.deepEqual(JUDGE_ACTIONS, ['answer', 'offer', 'silent']);
+    assert.ok(JUDGE_PROMPT_INTRO.includes('<candidate>'));
+    assert.ok(JUDGE_PROMPT_RULES.includes('Rules learned from live meetings'));
+  });
+
+  await t.test('buildJudgePrompt includes learned rules corpus and handles transcriptLagging option', () => {
+    const basePrompt = buildJudgePrompt({
+      candidateText: 'Walk me through how you designed the distributed rate limiter',
+      recentTurns: [
+        { channel: 'them', text: 'Thanks for joining the technical interview.' },
+        { channel: 'you', text: 'Glad to be here.' }
+      ]
+    });
+
+    // Declarative tasks / coding challenges / walk me through / tell me about a time
+    assert.ok(basePrompt.includes('A task stated declaratively IS an ask'));
+    assert.ok(basePrompt.includes('walk me through'));
+    assert.ok(basePrompt.includes('tell me about a time'));
+
+    // Self-answered, merged replies, logistics, granting permission, thinking out loud, deferral
+    assert.ok(basePrompt.includes('Why do we shard by user id? Because hot keys.'));
+    assert.ok(basePrompt.includes('A merged reply NEVER closes a question'));
+    assert.ok(basePrompt.includes('can you hear me'));
+    assert.ok(basePrompt.includes('can you see my screen'));
+    assert.ok(basePrompt.includes('you can totally look up syntax'));
+    assert.ok(basePrompt.includes('thinking out loud'));
+    assert.ok(basePrompt.includes("we'll get to X later"));
+
+    // Completeness detection
+    assert.ok(basePrompt.includes('complete=false, act="incomplete", action="silent"'));
+
+    // Recall bias
+    assert.ok(basePrompt.includes('WHEN IN DOUBT, ANSWER'));
+    assert.ok(basePrompt.includes('answerability >= 0.70'));
+
+    // Without transcriptLagging, the lagging note is absent
+    assert.equal(basePrompt.includes('live transcription froze ~2 seconds ago'), false);
+
+    // With transcriptLagging: true, appends the frozen transcript note
+    const laggingPrompt = buildJudgePrompt({
+      candidateText: 'How would you partition the ord',
+      recentTurns: [],
+      transcriptLagging: true
+    });
+    assert.ok(laggingPrompt.includes('live transcription froze ~2 seconds ago'));
+    assert.ok(laggingPrompt.includes('Do NOT mark complete=false solely because the last word looks cut off'));
+  });
+
+  await t.test('parseJudgeVerdict and routeForVerdict support all 9 act types and snake_case / camelCase aliases', () => {
+    for (const act of JUDGE_ACTS) {
+      const isIncomplete = act === 'incomplete';
+      const isNonAsk = act === 'rhetorical' || act === 'statement' || act === 'incomplete';
+      const rawJson = JSON.stringify({
+        is_ask: !isNonAsk,
+        directed_at_user: !isNonAsk,
+        complete: !isIncomplete,
+        act,
+        action: isNonAsk ? 'silent' : 'answer',
+        answerability: isNonAsk ? 0.1 : 0.91,
+        question_text: isNonAsk ? null : 'How do you handle backpressure in streams?'
+      });
+
+      const verdict = parseJudgeVerdict(rawJson, 'So quick question: How do you handle backpressure in streams?');
+      assert.ok(verdict, `expected parsed verdict for act=${act}`);
+      assert.equal(verdict.act, act);
+      assert.equal(verdict.is_ask, !isNonAsk);
+      assert.equal(verdict.isAsk, !isNonAsk);
+      assert.equal(verdict.directed_at_user, !isNonAsk);
+      assert.equal(verdict.directedAtUser, !isNonAsk);
+      assert.equal(verdict.complete, !isIncomplete);
+      assert.equal(verdict.action, isNonAsk ? 'silent' : 'answer');
+      assert.equal(verdict.answerability, isNonAsk ? 0.1 : 0.91);
+      assert.equal(verdict.confidence, verdict.answerability);
+
+      const route = routeForVerdict(verdict);
+      if (isIncomplete) {
+        assert.equal(route.route, 'wait_incomplete');
+      } else if (isNonAsk) {
+        assert.equal(route.route, 'ignore');
+      } else {
+        assert.equal(route.route, 'evaluate');
+        assert.equal(route.act, act);
+        assert.equal(route.answerability, 0.91);
+      }
+    }
+  });
+
+  await t.test('question_text grounding validation at 0.65 accepts grounded text and nulls hallucinated text to fall back to candidate', async () => {
+    const candidate = 'Yeah so earlier we talked about caching. Can you explain how consistent hashing works in DynamoDB?';
+
+    // Grounded question_text (100% containment >= 0.65) -> accepted
+    const groundedVerdict = parseJudgeVerdict({
+      is_ask: true,
+      directed_at_user: true,
+      complete: true,
+      act: 'technical',
+      action: 'answer',
+      answerability: 0.94,
+      question_text: 'Can you explain how consistent hashing works in DynamoDB?'
+    }, candidate);
+    assert.equal(groundedVerdict.question_text, 'Can you explain how consistent hashing works in DynamoDB?');
+    assert.equal(groundedVerdict.questionText, 'Can you explain how consistent hashing works in DynamoDB?');
+
+    // Ungrounded question_text (containment < 0.65) -> nulled out in parseJudgeVerdict
+    const ungroundedVerdict = parseJudgeVerdict({
+      is_ask: true,
+      directed_at_user: true,
+      complete: true,
+      act: 'technical',
+      action: 'answer',
+      answerability: 0.94,
+      question_text: 'What is the time complexity of quicksort on linked lists?'
+    }, candidate);
+    assert.equal(ungroundedVerdict.question_text, null);
+    assert.equal(ungroundedVerdict.questionText, null);
+
+    // In engine: when snake_case question_text is nulled by grounding check, engine falls back to candidateText.trim()
+    const clock = createFakeClock();
+    const dispatches = [];
+    const engine = new AutoAnswerEngine({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: async () => ({
+        is_ask: true,
+        directed_at_user: true,
+        complete: true,
+        act: 'technical',
+        action: 'answer',
+        answerability: 0.94,
+        question_text: 'What is the time complexity of quicksort on linked lists?'
+      })
+    });
+
+    engine.onTranscript({ channel: 'them', text: candidate, isFinal: true });
+    clock.advance(950);
+    await flush();
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], candidate);
+  });
+});
+
+test('Early judge at 120ms, endpoint-confirmed stop at 350ms, and STT-stall promotion at 2000ms (Step 3)', async (t) => {
+  await t.test('starts judge early after 120ms of quiet and holds verdict until 900ms stop is confirmed without double-calling judge', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    let judgeCalls = 0;
+
+    const engine = new AutoAnswerEngine({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: async ({ candidateText }) => {
+        judgeCalls++;
+        return {
+          is_ask: true,
+          directed_at_user: true,
+          complete: true,
+          act: 'technical',
+          action: 'answer',
+          answerability: 0.95,
+          question_text: candidateText
+        };
+      }
+    });
+
+    engine.onThemFinal('How do you design a distributed rate limiter in Redis?');
+
+    // Before 120ms: judge not called yet
+    clock.advance(100);
+    await flush();
+    assert.equal(judgeCalls, 0);
+    assert.equal(dispatches.length, 0);
+
+    // At 120ms: early judge fires, resolves, and holds verdict in engine.getState().held
+    clock.advance(25);
+    await flush();
+    assert.equal(judgeCalls, 1, 'early judge must fire at 120ms');
+    assert.equal(dispatches.length, 0, 'verdict must be held while stability timer (900ms) is still pending');
+    assert.ok(engine.getState().held, 'verdict should be stored in held state');
+
+    // Still before 900ms: still held
+    clock.advance(700);
+    await flush();
+    assert.equal(dispatches.length, 0);
+
+    // At 900ms: stability timer confirms stop and immediately dispatches held verdict without a 2nd judge call
+    clock.advance(100);
+    await flush();
+    assert.equal(judgeCalls, 1, 'must not call judge a second time when held verdict is ready');
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'How do you design a distributed rate limiter in Redis?');
+    assert.equal(engine.getState().held, null);
+  });
+
+  await t.test('invalidates held early verdict if new speech arrives before 900ms stop confirmation', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    let judgeCalls = 0;
+
+    const engine = new AutoAnswerEngine({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: async ({ candidateText }) => {
+        judgeCalls++;
+        return {
+          is_ask: true,
+          directed_at_user: true,
+          complete: true,
+          act: 'question',
+          action: 'answer',
+          answerability: 0.93,
+          question_text: candidateText
+        };
+      }
+    });
+
+    engine.onThemFinal('Tell me about a time you');
+    clock.advance(150);
+    await flush();
+    assert.equal(judgeCalls, 1);
+    assert.ok(engine.getState().held);
+    assert.equal(dispatches.length, 0);
+
+    // Speaker continues at 400ms before 900ms stability expires
+    clock.advance(250);
+    engine.onThemFinal('resolved a major database outage in production.');
+    assert.equal(engine.getState().held, null, 'new speech must clear stale held verdict');
+
+    // Early judge fires for combined utterance at +120ms, then dispatches at +900ms
+    clock.advance(950);
+    await flush();
+    assert.equal(judgeCalls, 2);
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'Tell me about a time you resolved a major database outage in production.');
+  });
+
+  await t.test('endpoint-confirmed stop (onProviderEndpoint / onLocalSpeechEnd) shortens wait from 900ms to 350ms', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+
+    const engine = new AutoAnswerEngine({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: async ({ candidateText }) => ({
+        is_ask: true,
+        directed_at_user: true,
+        complete: true,
+        act: 'technical',
+        action: 'answer',
+        answerability: 0.95,
+        question_text: candidateText
+      })
+    });
+
+    // Case 1: onProviderEndpoint()
+    engine.onThemFinal('What is the difference between raft and paxos consensus?');
+    engine.onProviderEndpoint();
+
+    clock.advance(300);
+    await flush();
+    assert.equal(dispatches.length, 0, 'must not dispatch before 350ms endpoint confirm');
+
+    clock.advance(60);
+    await flush();
+    assert.equal(dispatches.length, 1, 'must dispatch at 350ms when provider endpoint confirmed');
+    assert.equal(dispatches[0], 'What is the difference between raft and paxos consensus?');
+
+    // Case 2: onLocalSpeechEnd()
+    engine.onThemFinal('Walk me through your approach to zero downtime schema migrations');
+    engine.onLocalSpeechEnd();
+
+    clock.advance(360);
+    await flush();
+    assert.equal(dispatches.length, 2, 'must dispatch at 350ms when local speech end confirmed');
+  });
+
+  await t.test('STT-stall promotion promotes frozen interim after 2000ms with transcriptLagging: true and absorbs delayed final', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    const judgeRequests = [];
+
+    const engine = new AutoAnswerEngine({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: async (req) => {
+        judgeRequests.push(req);
+        return {
+          is_ask: true,
+          directed_at_user: true,
+          complete: true,
+          act: 'technical',
+          action: 'answer',
+          answerability: 0.92,
+          question_text: null
+        };
+      }
+    });
+
+    // Interim arrives and freezes
+    engine.onInterim({ channel: 'them', text: 'How would you partition the ord' });
+
+    // Before 2000ms: no promotion
+    clock.advance(1900);
+    await flush();
+    assert.equal(judgeRequests.length, 0);
+    assert.equal(dispatches.length, 0);
+
+    // At 2000ms: stall timer promotes frozen interim as provisional final and calls judge with transcriptLagging: true
+    clock.advance(150);
+    await flush();
+    assert.equal(judgeRequests.length, 1);
+    assert.equal(judgeRequests[0].candidateText, 'How would you partition the ord');
+    assert.equal(judgeRequests[0].transcriptLagging, true);
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'How would you partition the ord');
+
+    // Delayed real STT final arrives 1500ms later for the same utterance ("orders table?")
+    clock.advance(1500);
+    engine.onThemFinal('How would you partition the orders table?');
+    clock.advance(1000);
+    await flush();
+
+    // Must be absorbed without re-triggering a duplicate judge call or answer!
+    assert.equal(judgeRequests.length, 1, 'delayed final for same utterance must be absorbed without re-judging');
+    assert.equal(dispatches.length, 1, 'delayed final must not trigger duplicate answer');
+  });
+
+  await t.test('early judge still in flight when stability timer (900ms) fires dispatches immediately upon resolution', async () => {
+    const clock = createFakeClock();
+    const dispatches = [];
+    let judgeCalls = 0;
+    let resolveSlowJudge = null;
+
+    const engine = new AutoAnswerEngine({
+      clock,
+      onDispatch: (q) => dispatches.push(q),
+      judgeCandidate: ({ candidateText }) => {
+        judgeCalls++;
+        return new Promise((resolve) => {
+          resolveSlowJudge = () => resolve({
+            is_ask: true,
+            directed_at_user: true,
+            complete: true,
+            act: 'coding_task',
+            action: 'answer',
+            answerability: 0.96,
+            question_text: candidateText
+          });
+        });
+      }
+    });
+
+    engine.onSegment({ channel: 'them', text: 'Your task is to recreate Wordle in React.', isFinal: true });
+
+    // 120ms: early judge starts
+    clock.advance(130);
+    await flush();
+    assert.equal(judgeCalls, 1);
+    assert.equal(dispatches.length, 0);
+
+    // 900ms: stability timer fires while early judge is STILL in flight
+    clock.advance(800);
+    await flush();
+    assert.equal(judgeCalls, 1, 'stability timer must not start a duplicate judge call while early judge is in flight');
+    assert.equal(dispatches.length, 0);
+
+    // Now the slow early judge resolves at 1200ms -> dispatches immediately since stability timer already fired
+    resolveSlowJudge();
+    await flush();
+    assert.equal(dispatches.length, 1);
+    assert.equal(dispatches[0], 'Your task is to recreate Wordle in React.');
+  });
+
+  await t.test('scales earlyJudgeMs proportionally when custom stabilityMs is configured', async () => {
+    const clock = createFakeClock();
+    let judgeCalls = 0;
+
+    // 450ms stabilityMs -> earlyJudgeMs scales to 60ms
+    const engine = new AutoAnswerEngine({
+      clock,
+      stabilityMs: 450,
+      judgeCandidate: async () => {
+        judgeCalls++;
+        return { is_ask: false, directed_at_user: false, complete: true, act: 'statement', action: 'silent', answerability: 0.1 };
+      }
+    });
+
+    engine.onThemFinal('We use Kafka for event streaming across services.');
+    clock.advance(50);
+    await flush();
+    assert.equal(judgeCalls, 0);
+
+    clock.advance(15);
+    await flush();
+    assert.equal(judgeCalls, 1, 'scaled early judge should fire at 60ms when stabilityMs is 450ms');
   });
 });

@@ -496,6 +496,10 @@
           <div id="gemini-stt-fallback-desc" class="s-note"></div>
         </div>
 
+        <label class="s-label" for="sttDictionaryInput">Custom vocabulary / dictionary <span class="s-hint">up to 100 terms · comma or newline separated</span></label>
+        <textarea id="sttDictionaryInput" class="s-textarea" rows="3" placeholder="e.g. Kubernetes, GraphQL, CockroachDB, gRPC, FastAPI"></textarea>
+        <div class="s-note">Sent to Deepgram, Soniox, Google Cloud Speech, OpenAI Realtime, and Whisper to improve recognition of technical terms, names, and acronyms.</div>
+
         <label class="s-label">Meeting audio <span class="s-hint">transcribe the other side of a call</span></label>
         <div class="s-seg" id="meeting-audio-seg">
           <button data-meeting-audio="off">Off</button>

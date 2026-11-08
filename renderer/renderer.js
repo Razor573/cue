@@ -188,12 +188,75 @@
     el.scrollBy({ left: dx * scrollVelocity.mult, top: dy * scrollVelocity.mult, behavior: 'auto' });
   }
 
+  function sanitizeSttDictionaryTerms(raw, maxTerms = 100) {
+    if (!raw) return [];
+    const items = Array.isArray(raw) ? raw : String(raw).split(/[\r\n,;]+/);
+    const seen = new Set();
+    const out = [];
+    for (const item of items) {
+      if (typeof item !== 'string') continue;
+      const cleaned = item.replace(/[\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40).trim();
+      if (!cleaned) continue;
+      const key = cleaned.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(cleaned);
+      if (out.length >= maxTerms) break;
+    }
+    return out;
+  }
+
+  function isStaleDesktopChatEvent(stateOrPayload, incomingId, incomingSource = 'desktop') {
+    const normalizeSource = (src) => {
+      if (src === undefined || src === null || src === '') return 'desktop';
+      return String(src).trim().toLowerCase();
+    };
+    if (arguments.length >= 2) {
+      if (normalizeSource(incomingSource) !== 'desktop') return false;
+      const awaiting = Boolean(stateOrPayload && (stateOrPayload.awaitingStreamStart || stateOrPayload.awaitingStart));
+      if (awaiting) return true;
+      const floor = stateOrPayload
+        ? (stateOrPayload.replacedStreamFloor !== undefined ? stateOrPayload.replacedStreamFloor : stateOrPayload.floor)
+        : null;
+      return Number.isInteger(incomingId) && Number.isInteger(floor) && incomingId <= floor;
+    }
+    if (!stateOrPayload || typeof stateOrPayload !== 'object') return false;
+    const {
+      awaitingStreamStart,
+      awaitingStart,
+      streamId,
+      replacedStreamFloor,
+      floor,
+      activeStreamId,
+      source,
+    } = stateOrPayload;
+    if (normalizeSource(source) !== 'desktop') return false;
+    if (awaitingStreamStart || awaitingStart) return true;
+    const effectiveFloor = replacedStreamFloor !== undefined ? replacedStreamFloor : floor;
+    if (Number.isInteger(streamId) && Number.isInteger(effectiveFloor) && streamId <= effectiveFloor) {
+      return true;
+    }
+    if (Number.isInteger(streamId) && Number.isInteger(activeStreamId) && streamId !== activeStreamId) {
+      return true;
+    }
+    return false;
+  }
+
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { sanitizeLatex, renderMarkdown, splitMathSegments, COMMAND_REPLACEMENTS, rampedScroll };
+    module.exports = {
+      sanitizeLatex,
+      renderMarkdown,
+      splitMathSegments,
+      COMMAND_REPLACEMENTS,
+      rampedScroll,
+      sanitizeSttDictionaryTerms,
+      isStaleDesktopChatEvent
+    };
   }
   if (typeof window !== 'undefined') {
     window.sanitizeLatex = sanitizeLatex;
     window.renderMarkdown = renderMarkdown;
+    window.isStaleDesktopChatEvent = isStaleDesktopChatEvent;
   }
   if (typeof document === 'undefined') {
     return;
@@ -495,12 +558,34 @@
   }
 
   // ---- actions -----------------------------------------------------------
+  let awaitingStreamStart = false;
+  let activeStreamId = null;
+  let replacedStreamFloor = null;
+
+  function shouldDropChatStreamEvent(payload = {}) {
+    const streamId = typeof payload === 'number'
+      ? payload
+      : (payload && typeof payload === 'object' ? payload.streamId : undefined);
+    if (!Number.isInteger(streamId) && !awaitingStreamStart) return false;
+    return isStaleDesktopChatEvent({
+      awaitingStreamStart,
+      streamId,
+      replacedStreamFloor,
+      activeStreamId,
+      source: payload && typeof payload === 'object' ? payload.source : 'desktop'
+    });
+  }
+
   function runMode(mode, text) {
     const scrimEl = $('#settings-scrim');
     if (scrimEl && !scrimEl.classList.contains('hidden')) void closeSettings();
     if (busy) {
       finalizeCurrentResponse(true);
     }
+    if (Number.isInteger(activeStreamId)) {
+      replacedStreamFloor = activeStreamId;
+    }
+    awaitingStreamStart = true;
     setBusy(true);
     cue.ask({ mode, text: text || '' });
   }
@@ -942,7 +1027,9 @@
 
     const sttStatusEl = document.getElementById('stt-status');
     if (sttStatusEl) {
-      if (enabled && capturingActive && sttState !== 'error') {
+      if (sttState === 'failed' || (sttState === 'error' && sttFailureCause)) {
+        sttStatusEl.textContent = sttFailureLabel || `failed (${sttFailureCause || 'unknown'})`;
+      } else if (enabled && capturingActive && sttState !== 'error') {
         if (st === 'thinking') {
           sttStatusEl.textContent = 'Auto · Answering…';
         } else if (st === 'listening' || st === 'settling') {
@@ -1393,6 +1480,8 @@
   }
 
   let sttState = 'disconnected';
+  let sttFailureCause = null;
+  let sttFailureLabel = null;
 
   const STT_LABELS = {
     disconnected: 'Transcription off',
@@ -1402,15 +1491,26 @@
     batch: 'Transcription running',
     local: 'Transcription running',
     stopping: 'Stopping transcription…',
+    failed: 'STT failed (unknown)',
     error: 'Transcription error'
   };
 
-  function setSttState(state) {
+  function setSttState(state, failureCause, failureMessage) {
     sttState = state;
+    if (state === 'failed' || (state === 'error' && failureCause)) {
+      sttFailureCause = failureCause || 'unknown';
+      sttFailureLabel = `failed (${sttFailureCause})`;
+    } else if (state !== 'error') {
+      sttFailureCause = null;
+      sttFailureLabel = null;
+    }
     const label = document.getElementById('stt-status');
     if (!label) return;
-    label.textContent = STT_LABELS[state];
-    label.className = 'stt-status stt-' + state;
+    label.textContent = (state === 'failed' || (state === 'error' && sttFailureCause))
+      ? (sttFailureLabel || `failed (${sttFailureCause || 'unknown'})`)
+      : STT_LABELS[state];
+    if (failureMessage) label.title = failureMessage;
+    label.className = 'stt-status stt-' + (state === 'failed' ? 'error' : state);
     renderAutoAnswerUi();
   }
 
@@ -1695,8 +1795,16 @@
     clearInputInterim(); // FIX #12: Clear interim text from input area
     // sidebar: the final turn is added via the 'transcript' event below
   });
-  cue.on('stt:status', ({ channel, status, provider }) => {
-    cue.log(`[stt] ${provider || channel || 'unknown'} ${status}`);
+  cue.on('stt:status', (payload = {}) => {
+    const { channel, status, state, cause, message, provider } = payload;
+    const effectiveStatus = state || status;
+    cue.log(`[stt] ${provider || channel || 'unknown'} ${effectiveStatus}${cause ? ` (${cause})` : ''}`);
+    if (effectiveStatus === 'failed' || effectiveStatus === 'error') {
+      const resolvedCause = cause || 'unknown';
+      setSttState('failed', resolvedCause, message || `failed (${resolvedCause})`);
+      if (provider === 'local') setSessionButton(false);
+      return;
+    }
     if (provider === 'local') {
       const localStates = {
         loading: 'loading',
@@ -1706,15 +1814,15 @@
         off: 'disconnected',
         error: 'error'
       };
-      if (localStates[status]) setSttState(localStates[status]);
-      if (status === 'loading') setSessionButton(true);
-      if (status === 'off' || status === 'error') setSessionButton(false);
-      if (status === 'loading' || status === 'transcribing' || status === 'stopping') setLiveDotState('transcribing');
-      if (status === 'ready') setLiveDotState('idle');
-      if (status === 'off') setLiveDotState('off');
+      if (localStates[effectiveStatus]) setSttState(localStates[effectiveStatus]);
+      if (effectiveStatus === 'loading') setSessionButton(true);
+      if (effectiveStatus === 'off' || effectiveStatus === 'error') setSessionButton(false);
+      if (effectiveStatus === 'loading' || effectiveStatus === 'transcribing' || effectiveStatus === 'stopping') setLiveDotState('transcribing');
+      if (effectiveStatus === 'ready') setLiveDotState('idle');
+      if (effectiveStatus === 'off') setLiveDotState('off');
       return;
     }
-    if (status === 'connected') setSttState('streaming');
+    if (effectiveStatus === 'connected') setSttState('streaming');
   });
   cue.on('vad:state', ({ channel, speaking }) => {
     setLiveDotState(speaking ? 'speaking' : 'idle');
@@ -1725,7 +1833,26 @@
     const title = last && last.caption ? last.caption.split('\n')[0].slice(0, 80) : 'Slide ' + count;
     showToast(`Slide ${count} captured · ${title}`, 3000);
   });
-  cue.on('llm:start', ({ userBubble, small, category, mode, userText }) => {
+  cue.on('llm:stream-start', (payload = {}) => {
+    if (payload && Number.isInteger(payload.streamId)) {
+      const floorCandidate = payload.streamId - 1;
+      replacedStreamFloor = Number.isInteger(replacedStreamFloor)
+        ? Math.max(replacedStreamFloor, floorCandidate)
+        : floorCandidate;
+      activeStreamId = payload.streamId;
+      awaitingStreamStart = false;
+    }
+  });
+  cue.on('llm:start', (payload = {}) => {
+    const { userBubble, small, category, mode, userText, streamId } = payload;
+    if (Number.isInteger(streamId)) {
+      const floorCandidate = streamId - 1;
+      replacedStreamFloor = Number.isInteger(replacedStreamFloor)
+        ? Math.max(replacedStreamFloor, floorCandidate)
+        : floorCandidate;
+      activeStreamId = streamId;
+      awaitingStreamStart = false;
+    }
     if (autoController) autoController.onLlmStart();
     renderAutoAnswerUi();
     finalizeCurrentResponse(true);
@@ -1802,7 +1929,9 @@
     });
     setBusy(true);
   });
-  cue.on('llm:thought', ({ text }) => {
+  cue.on('llm:thought', (payload = {}) => {
+    if (shouldDropChatStreamEvent(payload)) return;
+    const { text } = payload;
     if (!thinkingEl) return;
     accumulatedThinking += text;
     const placeholder = thinkingEl.querySelector('.thinking-placeholder');
@@ -1817,11 +1946,15 @@
       bodyEl.scrollTop = bodyEl.scrollHeight;
     }
   });
-  cue.on('llm:token', ({ text }) => {
+  cue.on('llm:token', (payload = {}) => {
+    if (shouldDropChatStreamEvent(payload)) return;
+    const { text } = payload;
     if (autoController) autoController.onLlmToken();
     appendToken(text);
   });
-  cue.on('llm:done', ({ aborted } = {}) => {
+  cue.on('llm:done', (payload = {}) => {
+    if (shouldDropChatStreamEvent(payload)) return;
+    const { aborted } = payload;
     finalizeCurrentResponse(false);
     setBusy(false);
     if (autoController) autoController.onLlmDone();
@@ -1843,7 +1976,9 @@
       updateHistoryPill();
     }
   });
-  cue.on('llm:error', ({ message, action }) => {
+  cue.on('llm:error', (payload = {}) => {
+    if (shouldDropChatStreamEvent(payload)) return;
+    const { message, action } = payload;
     finalizeCurrentResponse(false);
     if (!aiEl) startAi(true);
     aiEl.dataset.raw = message; finalizeAi(); setBusy(false);
@@ -3078,6 +3213,9 @@
     const localWhisper = settings.localWhisper || { modelId: 'base.en', language: 'auto', threads: 0 };
     $('#whisper-language').value = localWhisper.language || 'auto';
     $('#whisper-threads').value = Number(localWhisper.threads) || 0;
+    if ($('#sttDictionaryInput')) {
+      $('#sttDictionaryInput').value = Array.isArray(settings.sttDictionary) ? settings.sttDictionary.join(', ') : '';
+    }
     // Slides tab (inside Transcription pane)
     const slidesCfg = settings.slides || { enabled: false, intervalMs: 3000 };
     const slidesEnabled = $('#slides-enabled');
@@ -3485,6 +3623,13 @@
     settings.localWhisper.modelId = $('#whisper-model').value || settings.localWhisper.modelId || 'base.en';
     settings.localWhisper.language = $('#whisper-language').value || 'auto';
     settings.localWhisper.threads = Math.max(0, Math.min(64, Number.parseInt($('#whisper-threads').value, 10) || 0));
+    if ($('#sttDictionaryInput')) {
+      const sttDictionary = sanitizeSttDictionaryTerms($('#sttDictionaryInput').value, 100);
+      settings.sttDictionary = sttDictionary;
+      if (window.cue && typeof window.cue.setSettings === 'function') {
+        try { await window.cue.setSettings({ sttDictionary }); } catch (_) {}
+      }
+    }
     // Slides (opt-in, memory-only)
     if (!settings.slides) settings.slides = {};
     const slidesEnabledEl = $('#slides-enabled');

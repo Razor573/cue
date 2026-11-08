@@ -610,3 +610,376 @@ test('geminiGenerationConfig: smart tier keeps the model default reasoning with 
   assert.equal(cfg.thinkingConfig, undefined);
   assert.ok(cfg.maxOutputTokens >= 1400 + 4096);
 });
+
+// ============================================================================
+// Step 9: Prompt Caching (Gemini caches.create + Claude cache_control)
+// ============================================================================
+
+const {
+  GeminiPromptCache,
+  GEMINI_CACHE_MIN_PROMPT_CHARS,
+  getClaudeCacheMinChars,
+  buildClaudeSystemBlocks,
+  streamGemini,
+  askGemini,
+  streamAnthropic,
+  askAnthropic,
+  listGeminiModels,
+  listProviderModels,
+  clearModelCatalogCache,
+  migrateRetiredModel,
+  migrateSettingsModels,
+  RETIRED_MODEL_MIGRATIONS
+} = require('../src/llm');
+
+test('Step 9.1: GeminiPromptCache skips prompts below 4500 chars and creates/caches above threshold', async () => {
+  const cache = new GeminiPromptCache();
+  let createCalls = 0;
+  let lastCreateArg = null;
+  const fakeAi = {
+    caches: {
+      create: async (arg) => {
+        createCalls += 1;
+        lastCreateArg = arg;
+        return { name: `cachedContents/test-${createCalls}` };
+      }
+    }
+  };
+
+  // Below threshold (< 4500 chars)
+  const shortPrompt = 'Short system prompt.';
+  assert.equal(await cache.getOrCreate(fakeAi, 'gemini-3.8-flash', shortPrompt), null);
+  assert.equal(cache.getCachedOrWarmInBackground(fakeAi, 'gemini-3.8-flash', shortPrompt), null);
+  assert.equal(createCalls, 0);
+
+  // Above threshold (>= 4500 chars)
+  const longPrompt = 'A'.repeat(GEMINI_CACHE_MIN_PROMPT_CHARS + 100);
+  const name1 = await cache.getOrCreate(fakeAi, 'gemini-3.8-flash', longPrompt);
+  assert.equal(name1, 'cachedContents/test-1');
+  assert.equal(createCalls, 1);
+  assert.equal(lastCreateArg.model, 'gemini-3.8-flash');
+  assert.equal(lastCreateArg.config.ttl, '3600s');
+  assert.deepEqual(lastCreateArg.config.systemInstruction, { parts: [{ text: longPrompt }] });
+
+  // Subsequent call hits cache without creating again
+  const name2 = await cache.getOrCreate(fakeAi, 'gemini-3.8-flash', longPrompt);
+  assert.equal(name2, 'cachedContents/test-1');
+  assert.equal(createCalls, 1);
+  assert.equal(cache.getStats().hits, 1);
+});
+
+test('Step 9.1: GeminiPromptCache getCachedOrWarmInBackground warms asynchronously on miss and returns cached name on next turn', async () => {
+  const cache = new GeminiPromptCache();
+  let createCalls = 0;
+  const fakeAi = {
+    caches: {
+      create: async () => {
+        createCalls += 1;
+        return { name: 'cachedContents/warmed-1' };
+      }
+    }
+  };
+
+  const longPrompt = 'B'.repeat(GEMINI_CACHE_MIN_PROMPT_CHARS + 50);
+  // First turn: synchronous miss, triggers background warm-up
+  const firstTurn = cache.getCachedOrWarmInBackground(fakeAi, 'gemini-3.8-flash', longPrompt);
+  assert.equal(firstTurn, null);
+
+  // Wait for background promise to resolve
+  await new Promise((r) => setImmediate(r));
+  assert.equal(createCalls, 1);
+
+  // Second turn: synchronous hit!
+  const secondTurn = cache.getCachedOrWarmInBackground(fakeAi, 'gemini-3.8-flash', longPrompt);
+  assert.equal(secondTurn, 'cachedContents/warmed-1');
+});
+
+test('Step 9.1: streamGemini and askGemini use cachedContent when available and fail-open on cache error', async () => {
+  const cache = new GeminiPromptCache();
+  const longSystem = 'S'.repeat(GEMINI_CACHE_MIN_PROMPT_CHARS + 200);
+  const generateCalls = [];
+
+  const fakeAi = {
+    caches: {
+      create: async () => ({ name: 'cachedContents/gem-stream-1' })
+    },
+    models: {
+      generateContentStream: async (req) => {
+        generateCalls.push(req);
+        if (req.config.cachedContent && generateCalls.length === 2) {
+          throw new Error('CachedContent not found or expired');
+        }
+        return (async function* () {
+          yield { text: 'gemini-ok' };
+        })();
+      },
+      generateContent: async (req) => {
+        generateCalls.push(req);
+        return { text: 'gemini-ask-ok' };
+      }
+    }
+  };
+
+  // Warm the cache first
+  await cache.getOrCreate(fakeAi, 'gemini-3.8-flash', longSystem);
+
+  // Turn 1: uses cachedContent (omits systemInstruction)
+  const tokens = [];
+  const res1 = await streamGemini({
+    ai: fakeAi,
+    promptCache: cache,
+    model: 'gemini-3.8-flash',
+    system: longSystem,
+    turns: [{ role: 'user', text: 'Hello' }],
+    onToken: (t) => tokens.push(t)
+  });
+  assert.equal(res1, 'gemini-ok');
+  assert.equal(generateCalls[0].config.cachedContent, 'cachedContents/gem-stream-1');
+  assert.equal(generateCalls[0].config.systemInstruction, undefined);
+
+  // Turn 2: simulate expired cachedContent -> invalidates and retries inline with systemInstruction
+  const res2 = await streamGemini({
+    ai: fakeAi,
+    promptCache: cache,
+    model: 'gemini-3.8-flash',
+    system: longSystem,
+    turns: [{ role: 'user', text: 'Retry test' }],
+    onToken: () => {}
+  });
+  assert.equal(res2, 'gemini-ok');
+  assert.equal(generateCalls.length, 3);
+  assert.equal(generateCalls[2].config.cachedContent, undefined);
+  assert.equal(generateCalls[2].config.systemInstruction, longSystem);
+
+  // Re-warm and verify askGemini uses cachedContent
+  await cache.getOrCreate(fakeAi, 'gemini-3.8-flash', longSystem);
+  const resAsk = await askGemini({
+    ai: fakeAi,
+    promptCache: cache,
+    model: 'gemini-3.8-flash',
+    system: longSystem,
+    turns: [{ role: 'user', text: 'Ask test' }]
+  });
+  assert.equal(resAsk, 'gemini-ask-ok');
+  assert.equal(generateCalls[3].config.cachedContent, 'cachedContents/gem-stream-1');
+  assert.equal(generateCalls[3].config.systemInstruction, undefined);
+});
+
+test('Step 9.2: getClaudeCacheMinChars and buildClaudeSystemBlocks enforce model-specific min-chars guard and attach cache_control', () => {
+  // Haiku 4.5 / Opus 4.5 / Opus 4.6 require 4096 tokens (~16,384 chars)
+  assert.equal(getClaudeCacheMinChars('claude-haiku-4-5-20251001'), 16384);
+  assert.equal(getClaudeCacheMinChars('claude-opus-4-6'), 16384);
+  assert.equal(getClaudeCacheMinChars('claude-opus-4-5-20251101'), 16384);
+
+  // Sonnet 4.6 / Haiku 3.5 require 2048 tokens (~8,192 chars); Sonnet 4.5 / Haiku 3 require 1024 tokens (~4,096 chars)
+  assert.equal(getClaudeCacheMinChars('claude-sonnet-4-6'), 8192);
+  assert.equal(getClaudeCacheMinChars('claude-3-haiku-20240307'), 4096);
+
+  // Short prompt below min-chars guard returns block without cache_control
+  const shortPrompt = 'Be concise.';
+  assert.deepEqual(buildClaudeSystemBlocks(shortPrompt, 'claude-sonnet-4-6'), [
+    { type: 'text', text: shortPrompt }
+  ]);
+
+  // Prompt above min-chars guard returns array with cache_control: { type: 'ephemeral' }
+  const longSonnetPrompt = 'C'.repeat(9000);
+  assert.deepEqual(buildClaudeSystemBlocks(longSonnetPrompt, 'claude-sonnet-4-6'), [
+    {
+      type: 'text',
+      text: longSonnetPrompt,
+      cache_control: { type: 'ephemeral' }
+    }
+  ]);
+
+  // Same 9000-char prompt on Haiku 4.5 is still below 16,384 chars -> no cache_control
+  assert.deepEqual(buildClaudeSystemBlocks(longSonnetPrompt, 'claude-haiku-4-5'), [
+    { type: 'text', text: longSonnetPrompt }
+  ]);
+});
+
+test('Step 9.2: streamAnthropic and askAnthropic send cache_control block above threshold and fail-open if rejected', async () => {
+  const longPrompt = 'D'.repeat(9000);
+  const streamReqs = [];
+  const createReqs = [];
+
+  const fakeClient = {
+    messages: {
+      create: async (req) => {
+        if (req.stream) {
+          streamReqs.push(req);
+          if (Array.isArray(req.system) && streamReqs.length === 2) {
+            throw new Error('cache_control not supported for this request');
+          }
+          return (async function* () {
+            yield { type: 'content_block_delta', delta: { type: 'text_delta', text: 'claude-ok' } };
+          })();
+        }
+        createReqs.push(req);
+        return { content: [{ type: 'text', text: 'claude-ask-ok' }] };
+      }
+    }
+  };
+
+  // 1. Stream with cache_control block
+  const out1 = await streamAnthropic({
+    client: fakeClient,
+    model: 'claude-sonnet-4-6',
+    system: longPrompt,
+    turns: [{ role: 'user', text: 'Hello' }],
+    onToken: () => {}
+  });
+  assert.equal(out1, 'claude-ok');
+  assert.ok(Array.isArray(streamReqs[0].system));
+  assert.deepEqual(streamReqs[0].system[0].cache_control, { type: 'ephemeral' });
+
+  // 2. Fail-open retry with plain system string when cache_control throws
+  const out2 = await streamAnthropic({
+    client: fakeClient,
+    model: 'claude-sonnet-4-6',
+    system: longPrompt,
+    turns: [{ role: 'user', text: 'Retry' }],
+    onToken: () => {}
+  });
+  assert.equal(out2, 'claude-ok');
+  assert.equal(streamReqs.length, 3);
+  assert.equal(streamReqs[2].system, longPrompt);
+
+  // 3. askAnthropic sends cache_control block
+  const outAsk = await askAnthropic({
+    client: fakeClient,
+    model: 'claude-sonnet-4-6',
+    system: longPrompt,
+    turns: [{ role: 'user', text: 'Ask' }]
+  });
+  assert.equal(outAsk, 'claude-ask-ok');
+  assert.ok(Array.isArray(createReqs[0].system));
+  assert.deepEqual(createReqs[0].system[0].cache_control, { type: 'ephemeral' });
+});
+
+// ============================================================================
+// Step 10: Live Model Catalogue, Retired-Model Migration, and 24h Cache
+// ============================================================================
+
+test('Step 10.1: listGeminiModels filters /v1beta/models to only gemini-3 and gemini-4 generateContent models', async () => {
+  const fakeFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      models: [
+        { name: 'models/gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-4.0-pro', displayName: 'Gemini 4.0 Pro', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-2.0-flash', displayName: 'Gemini 2.0 Flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.5-flash-tts', displayName: 'Gemini 3.5 TTS', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.5-embedding', displayName: 'Gemini 3.5 Embedding', supportedGenerationMethods: ['embedContent'] },
+        { name: 'models/gemini-3.5-live-preview', displayName: 'Gemini 3.5 Live', supportedGenerationMethods: ['generateContent'] }
+      ]
+    })
+  });
+
+  const models = await listGeminiModels('gem-key', fakeFetch);
+  const ids = models.map((m) => m.id);
+  assert.deepEqual(ids, ['gemini-3.8-flash', 'gemini-4.0-pro']);
+});
+
+test('Step 10.1: listProviderModels returns ONLY live models when live fetch succeeds (retired curated IDs disappear) and falls back to curated when fetch fails', async () => {
+  clearModelCatalogCache();
+
+  const liveOpenAiFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: [
+        { id: 'gpt-5.4' },
+        { id: 'gpt-5.4-mini' }
+      ]
+    })
+  });
+
+  const liveRes = await listProviderModels('openai', { apiKeys: { openai: 'sk-live' } }, { fetchImpl: liveOpenAiFetch, forceRefresh: true });
+  assert.equal(liveRes.live, true);
+  assert.deepEqual(liveRes.models.map((m) => m.id), ['gpt-5.4', 'gpt-5.4-mini']);
+  // Curated-only IDs like gpt-4o or o3-mini are NOT merged in when live fetch succeeds
+  assert.equal(liveRes.models.some((m) => m.id === 'gpt-4o'), false);
+
+  // When live fetch fails, falls back to curated list
+  const failingFetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => 'Internal Server Error'
+  });
+  const fallbackRes = await listProviderModels('openai', { apiKeys: { openai: 'sk-fail' } }, { fetchImpl: failingFetch, forceRefresh: true });
+  assert.equal(fallbackRes.live, false);
+  assert.ok(fallbackRes.models.some((m) => m.id === 'gpt-4o'));
+});
+
+test('Step 10.2: migrateRetiredModel and migrateSettingsModels migrate retired models statically and against live catalogues', () => {
+  // Static RETIRED_MODEL_MIGRATIONS table
+  assert.equal(migrateRetiredModel('gemini', 'gemini-2.0-flash', 'fast'), 'gemini-3-flash-preview');
+  assert.equal(migrateRetiredModel('gemini', 'gemini-2.5-pro', 'smart'), 'gemini-3.1-pro-preview');
+  assert.equal(migrateRetiredModel('openai', 'gpt-3.5-turbo', 'fast'), 'gpt-5.4-mini');
+  assert.equal(migrateRetiredModel('anthropic', 'claude-3-opus-20240229', 'smart'), 'claude-sonnet-4-6');
+  assert.equal(migrateRetiredModel('groq', 'llama-3.3-70b-versatile', 'smart'), 'openai/gpt-oss-120b');
+  assert.equal(migrateRetiredModel('deepseek', 'deepseek-reasoner', 'smart'), 'deepseek-r2');
+  assert.ok(RETIRED_MODEL_MIGRATIONS.gemini);
+
+  // Live catalogue migration when a saved model disappears from live models
+  const liveCatalog = [
+    { id: 'gemini-3.8-flash', tier: 'fast' },
+    { id: 'gemini-3.1-pro-preview', tier: 'smart' }
+  ];
+  assert.equal(migrateRetiredModel('gemini', 'gemini-3.0-retired-custom', liveCatalog, 'fast'), 'gemini-3.8-flash');
+  assert.equal(migrateRetiredModel('gemini', 'gemini-3.0-retired-custom', liveCatalog, 'smart'), 'gemini-3.1-pro-preview');
+
+  // migrateSettingsModels mutates settings.models in place and reports changes
+  const settings = {
+    models: {
+      gemini: { fast: 'gemini-2.0-flash', smart: 'gemini-2.5-pro' },
+      openai: { fast: 'gpt-3.5-turbo', smart: 'gpt-5.4' }
+    }
+  };
+  const result = migrateSettingsModels(settings);
+  assert.equal(result.changed, true);
+  assert.equal(settings.models.gemini.fast, 'gemini-3-flash-preview');
+  assert.equal(settings.models.gemini.smart, 'gemini-3.1-pro-preview');
+  assert.equal(settings.models.openai.fast, 'gpt-5.4-mini');
+  assert.equal(settings.models.openai.smart, 'gpt-5.4');
+});
+
+test('Step 10.3: listProviderModels caches live catalogue for 24h and invalidates on forceRefresh or key change', async () => {
+  clearModelCatalogCache();
+  let fetchCount = 0;
+  const fakeFetch = async () => {
+    fetchCount += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        models: [
+          { name: 'models/gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', supportedGenerationMethods: ['generateContent'] }
+        ]
+      })
+    };
+  };
+
+  // First call fetches live
+  const res1 = await listProviderModels('gemini', { apiKeys: { gemini: 'key-1' } }, { fetchImpl: fakeFetch });
+  assert.equal(res1.live, true);
+  assert.equal(fetchCount, 1);
+
+  // Second call with same key hits 24h cache without network call
+  const res2 = await listProviderModels('gemini', { apiKeys: { gemini: 'key-1' } }, { fetchImpl: fakeFetch });
+  assert.equal(res2.live, true);
+  assert.equal(res2.cached, true);
+  assert.equal(fetchCount, 1);
+
+  // Changing API key invalidates cache and fetches live
+  const res3 = await listProviderModels('gemini', { apiKeys: { gemini: 'key-2' } }, { fetchImpl: fakeFetch });
+  assert.equal(res3.live, true);
+  assert.equal(fetchCount, 2);
+
+  // forceRefresh bypasses cache
+  const res4 = await listProviderModels('gemini', { apiKeys: { gemini: 'key-2' } }, { fetchImpl: fakeFetch, forceRefresh: true });
+  assert.equal(res4.live, true);
+  assert.equal(fetchCount, 3);
+});

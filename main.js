@@ -2,10 +2,10 @@ const { app, BrowserWindow, ipcMain, globalShortcut, screen, session, desktopCap
 const path = require('path');
 const os = require('os');
 const store = require('./src/store');
-const { captureScreenshot, captureScreenshotDetailed } = require('./src/screen');
-const { createSTT } = require('./src/stt');
+const { captureScreenshot, captureScreenshotDetailed, captureScreenWithFallback, captureScreen } = require('./src/screen');
+const { createSTT, classifySttError, describeSttError } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
-const { createLLM, listProviderModels, testProviderConnection, listGeminiSTTModels } = require('./src/llm');
+const { createLLM, listProviderModels, refreshProviderModelCatalog, migrateSettingsModels, testProviderConnection, listGeminiSTTModels } = require('./src/llm');
 const { validateServiceAccountJson } = require('./src/vertex-ai');
 const { signInAntigravity, signOutAntigravity, getAntigravityStatus } = require('./src/antigravity');
 const { signInCodex, signOutCodex, getCodexStatus } = require('./src/codex');
@@ -549,11 +549,20 @@ function handleSttError(err, settings) {
     context: { provider: err.provider, status: err.status || null, alreadyDisabled: sttDisabled },
   });
   if (sttDisabled) return;
-  const isQuota = err.status === 429 || err.code === 'RESOURCE_EXHAUSTED' || (err.message && err.message.includes('Quota exceeded'));
-  const noAccess = err.status === 403 || err.status === 401 || err.code === 'model_not_found' || isQuota;
+  const cause = (err && err.cause) || classifySttError(err);
+  const failureMsg = describeSttError(err.provider, err);
+  send('stt:status', {
+    state: 'failed',
+    status: 'failed',
+    cause,
+    provider: err.provider,
+    message: failureMsg
+  });
+  const isQuota = cause === 'quota' || err.status === 429 || err.code === 'RESOURCE_EXHAUSTED' || (err.message && err.message.includes('Quota exceeded'));
+  const noAccess = cause === 'auth' || cause === 'no mic' || err.status === 403 || err.status === 401 || err.code === 'model_not_found' || isQuota;
   sttDisabled = true; // stop hammering the API every few seconds
   if (noAccess) {
-    send('status', { message: `Transcription off: your ${err.provider} key was rejected or hit a quota limit. Update your key in Settings to resume.` });
+    send('status', { message: `Transcription ${failureMsg}. Update your key or audio settings to resume.` });
   } else {
     send('status', { message: 'Transcription error (' + err.provider + '): ' + err.message });
   }
@@ -592,9 +601,14 @@ function initStreamingSTT() {
       onInterim: (ch, text) => {
         if (instance && streamingSTT[ch] !== instance) return;
         if (ch === 'you' && (Date.now() - crossTalkState.themLastActiveTs < 1000)) return;
+        const turn = { channel: ch, speaker: ch, text, ts: Date.now() };
         send('stt:interim', { channel: ch, text });
         if (ch === 'them' && autoAnswer) {
-          autoAnswer.onThemInterim(text);
+          if (typeof autoAnswer.onInterim === 'function') {
+            autoAnswer.onInterim(turn);
+          } else if (typeof autoAnswer.onThemInterim === 'function') {
+            autoAnswer.onThemInterim(text);
+          }
         }
       },
       onError: (err) => {
@@ -603,19 +617,33 @@ function initStreamingSTT() {
         // and start the batch loop alongside them (double transcription).
         if (instance && streamingSTT[channel] !== instance) return;
         console.log('[streaming-stt] error', err.provider, err.message);
+        const cause = (err && err.cause) || classifySttError(err);
+        const failureMsg = describeSttError(err.provider, err);
+        send('stt:status', {
+          channel,
+          state: 'failed',
+          status: 'failed',
+          cause,
+          provider: err.provider,
+          message: failureMsg
+        });
         const batchFallbackAvailable = createSTT(settings).available;
         stopStreamingSTT(); // close WebSockets and clear keep-alive intervals
-        if (batchFallbackAvailable) {
-          send('status', { message: `Streaming transcription (${err.provider}) error: ${err.message}. Falling back to batch mode.` });
+        if (batchFallbackAvailable && cause !== 'no mic') {
+          send('status', { message: `Streaming transcription (${err.provider}) ${failureMsg}. Falling back to batch mode.` });
           startFlushLoop();
         } else if (!sttDisabled) {
           sttDisabled = true;
-          send('status', { message: `Transcription stopped (${err.provider}): ${err.message}. The selected provider has no batch fallback.` });
+          send('status', { message: `Transcription stopped (${err.provider}): ${failureMsg}.` });
         }
         streamingMode = false;
       },
       onStatusChange: (ch, status) => {
-        send('stt:status', { channel: ch, status });
+        if (status && typeof status === 'object') {
+          send('stt:status', { channel: ch, ...status });
+        } else {
+          send('stt:status', { channel: ch, status });
+        }
         if (status === 'connected') {
           console.log(`[streaming-stt] ${ch} channel connected`);
         }
@@ -917,8 +945,10 @@ async function setCapturing(active) {
 
 // -------- feature runner --------
 let activeFeatureAbort = null;
+let currentStreamId = 0;
 
 function abortActiveFeature() {
+  currentStreamId++;
   if (activeFeatureAbort) {
     activeFeatureAbort.abort();
     activeFeatureAbort = null;
@@ -942,15 +972,16 @@ async function runFeature(mode, userText) {
       activeFeatureAbort.abort();
       activeFeatureAbort = null;
     }
-    send('llm:done', { aborted: true });
     state.busy = false;
   }
   const def = MODES[mode];
   if (!def) return;
+  const myStreamId = ++currentStreamId;
   state.busy = true;
   activeFeatureAbort = new AbortController();
   const currentAbort = activeFeatureAbort;
   let streamSettled = false; // drop stray tokens from a stream we've already abandoned
+  const isReplaced = () => myStreamId !== currentStreamId || currentAbort.signal.aborted;
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
@@ -981,16 +1012,19 @@ async function runFeature(mode, userText) {
       send('session:directive', { directives: sessionDirectives, added: trimmed });
       const isOnlyDirective = !/(\?|solve|what is|how do|calculate|explain)/i.test(trimmed);
       if (isOnlyDirective) {
-        send('llm:start', { mode, userText: trimmed });
-        send('llm:token', { text: `**Directive Active:** "${trimmed}"\n\nI have saved this directive and will apply it to all upcoming questions.` });
-        send('llm:done', {});
+        send('llm:start', { mode, streamId: myStreamId, userText: trimmed });
+        send('llm:stream-start', { streamId: myStreamId, feature: mode, mode });
+        send('llm:token', { streamId: myStreamId, text: `**Directive Active:** "${trimmed}"\n\nI have saved this directive and will apply it to all upcoming questions.` });
+        send('llm:done', { streamId: myStreamId });
         return;
       }
     }
 
-    send('llm:start', { mode, userText: userText || '', userBubble, small: !!def.small, category });
+    send('llm:start', { mode, streamId: myStreamId, userText: userText || '', userBubble, small: !!def.small, category });
+    send('llm:stream-start', { streamId: myStreamId, feature: mode, mode });
 
     if (!llm.ready) {
+      if (isReplaced()) return;
       const message = llm.configurationError || ('Complete the ' + settings.provider + ' provider settings. Model: ' + (llm.model || 'unset') + '.');
       if (settings.provider === publik.PUBLIK_PROVIDER) {
         // No key yet: either the disclosure was never accepted (open it — the
@@ -999,10 +1033,10 @@ async function runFeature(mode, userText) {
         const action = !settings.publik.disclosureAccepted
           ? { kind: 'disclosure' }
           : { kind: 'reconnect', label: 'Reconnect' };
-        send('llm:error', { message, action });
+        send('llm:error', { streamId: myStreamId, message, action });
         return;
       }
-      send('llm:error', { message });
+      send('llm:error', { streamId: myStreamId, message });
       return;
     }
     // Never a silent starter (CONTRACT §12.4): the first-run card — balance,
@@ -1011,7 +1045,8 @@ async function runFeature(mode, userText) {
     // right after provisioning; this gate catches a card that was never
     // acknowledged (e.g. an install provisioned by an earlier release).
     if (settings.provider === publik.PUBLIK_PROVIDER && settings.apiKeys.publik && !settings.publik.cardShown) {
-      send('llm:error', { message: 'publik API is set up. Take a look at the card, then ask again.', action: { kind: 'card' } });
+      if (isReplaced()) return;
+      send('llm:error', { streamId: myStreamId, message: 'publik API is set up. Take a look at the card, then ask again.', action: { kind: 'card' } });
       return;
     }
 
@@ -1021,15 +1056,18 @@ async function runFeature(mode, userText) {
       send('companion:consumed', { title: companionContext.title });
     }
     if (def.needsScreen) {
+      const profile = (mode === 'leetcode' || mode === 'solve-code' || mode === 'coding') ? 'technical' : 'default';
       let screenBlack = false;
       try {
-        const shot = await captureScreenshotDetailed();
-        imageDataUrl = shot.dataUrl;
-        screenBlack = shot.black;
+        const shot = typeof captureScreenWithFallback === 'function'
+          ? await captureScreenWithFallback(companionServer, { profile, mode, feature: mode })
+          : await captureScreenshotDetailed({ profile, mode, feature: mode });
+        imageDataUrl = shot && shot.dataUrl ? shot.dataUrl : null;
+        screenBlack = Boolean(shot && shot.black);
         if (!imageDataUrl && !companionContext) throw new Error(screenBlack ? 'SCREEN_BLACK' : 'No screen source was available.');
       }
       catch (e) {
-        if (!companionContext) {
+        if (!companionContext && !isReplaced()) {
           recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
           const message = (e && e.message === 'SCREEN_BLACK')
             ? 'Screenshot came back black - this window may block screen capture. Capture the page with the browser companion (Ctrl+Shift+B) and try again.'
@@ -1041,10 +1079,12 @@ async function runFeature(mode, userText) {
           send('status', { message });
         }
       }
-      if (screenBlack && companionContext) {
+      if (screenBlack && companionContext && !isReplaced()) {
         send('status', { message: 'Screenshot came back black - using the captured page text instead.' });
       }
     }
+
+    if (isReplaced()) return;
 
     // Follow-up / Recap have nothing to work with before anything was heard —
     // sent to the model anyway, it fabricates plausible generic output that
@@ -1052,7 +1092,7 @@ async function runFeature(mode, userText) {
     // every feature actually ran with.
     console.log(`[llm] mode=${mode} transcriptTurns=${transcript.length} capturing=${state.capturing}`);
     if (def.transcriptRequired && transcript.length === 0) {
-      send('llm:error', { message: state.capturing
+      send('llm:error', { streamId: myStreamId, message: state.capturing
         ? 'Nothing has been transcribed yet — say something (or let the other side talk) and try again.'
         : 'Nothing captured yet — press the listen button first so cue can hear the conversation.' });
       return;
@@ -1123,7 +1163,7 @@ async function runFeature(mode, userText) {
           imageDataUrl,
           signal: currentAbort.signal,
           onThought: (thoughtText) => {
-            if (streamSettled || currentAbort.signal.aborted) return;
+            if (streamSettled || isReplaced()) return;
             if (trace && !firstChunkSeen) {
               firstChunkSeen = true;
               trace.mark('first_chunk');
@@ -1131,10 +1171,10 @@ async function runFeature(mode, userText) {
             rearm();
             // Empty thoughts are the Vertex keep-alive (see src/vertex-ai.js):
             // they rearm the watchdog but must never reach the UI.
-            if (thoughtText) send('llm:thought', { text: thoughtText });
+            if (thoughtText) send('llm:thought', { streamId: myStreamId, text: thoughtText });
           },
           onToken: (t) => {
-            if (streamSettled || currentAbort.signal.aborted) return;
+            if (streamSettled || isReplaced()) return;
             if (trace && !firstChunkSeen) {
               firstChunkSeen = true;
               trace.mark('first_chunk');
@@ -1146,7 +1186,7 @@ async function runFeature(mode, userText) {
             totalTokens++;
             fullAnswerText += t;
             rearm();
-            send('llm:token', { text: t });
+            send('llm:token', { streamId: myStreamId, text: t });
           },
           onResponse: settings.provider === publik.PUBLIK_PROVIDER ? (res) => publikNoteHeaders(res && res.headers) : undefined
         }),
@@ -1160,16 +1200,17 @@ async function runFeature(mode, userText) {
       trace.mark('response_completed', { tokenCount: totalTokens });
       trace.finish();
     }
-    if (!currentAbort.signal.aborted) {
-      send('llm:done', {});
+    if (isReplaced()) {
+      return;
     }
-    if (mode === 'leetcode' && !currentAbort.signal.aborted && fullAnswerText.trim() && isAssessmentRefusal(fullAnswerText)) {
+    send('llm:done', { streamId: myStreamId });
+    if (mode === 'leetcode' && !isReplaced() && fullAnswerText.trim() && isAssessmentRefusal(fullAnswerText)) {
       // The model refused after seeing assessment chrome. The next leetcode
       // run retries with a reinforced instruction (one-shot, see above).
       leetcodeRefusalRepair = true;
       send('status', { message: 'The model refused this coding problem after seeing assessment chrome - press Solve what\'s on screen again and it will retry with a reinforced instruction.' });
     }
-    if (settings.claimValidator && !currentAbort.signal.aborted && fullAnswerText.trim()) {
+    if (settings.claimValidator && !isReplaced() && fullAnswerText.trim()) {
       if (trace) trace.mark('validation_started');
       const profile = {
         resumeText: settings.resumeText || '',
@@ -1196,12 +1237,12 @@ async function runFeature(mode, userText) {
     // GET /wallet shortly after the answer — one request per answer, debounced.
     if (settings.provider === publik.PUBLIK_PROVIDER) publikScheduleWalletRefresh();
   } catch (e) {
-    if (currentAbort.signal.aborted || (e && /abort/i.test(e.message))) {
+    if (isReplaced() || (e && /abort/i.test(e.message))) {
       return;
     }
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
     const action = e && e.action ? e.action : null;
-    send('llm:error', { message: e && e.message ? e.message : String(e), action });
+    send('llm:error', { streamId: myStreamId, message: e && e.message ? e.message : String(e), action });
     if (action) publikHandleErrorAction(action);
   } finally {
     streamSettled = true;
@@ -1209,6 +1250,37 @@ async function runFeature(mode, userText) {
       activeFeatureAbort = null;
       state.busy = false;
     }
+  }
+}
+
+async function refreshAndMigrateProviderCatalog(providerId, settingsObj = null, options = { forceRefresh: true }) {
+  try {
+    const s = settingsObj || store.getSettings();
+    const targetProvider = providerId || s.provider || 'openai';
+    const before = JSON.stringify({
+      fastModel: s.fastModel,
+      smartModel: s.smartModel,
+      providerModels: s.providerModels,
+      models: s.models
+    });
+    const res = await refreshProviderModelCatalog(targetProvider, s, options);
+    const after = JSON.stringify({
+      fastModel: s.fastModel,
+      smartModel: s.smartModel,
+      providerModels: s.providerModels,
+      models: s.models
+    });
+    if (before !== after || s._migrated) {
+      store.setSettings({
+        ...(s.fastModel ? { fastModel: s.fastModel } : {}),
+        ...(s.smartModel ? { smartModel: s.smartModel } : {}),
+        ...(s.providerModels ? { providerModels: s.providerModels } : {}),
+        ...(s.models ? { models: s.models } : {})
+      });
+    }
+    return res;
+  } catch (_) {
+    return null;
   }
 }
 
@@ -1220,7 +1292,14 @@ ipcMain.handle('settings:get', () => ({
   antigravityStatus: getAntigravityStatus(),
   codexStatus: getCodexStatus()
 }));
-ipcMain.handle('models:list', async (_e, params = {}) => listProviderModels(store.getSettings(), params || {}));
+ipcMain.handle('models:list', async (_e, params = {}) => {
+  const settings = store.getSettings();
+  const res = await listProviderModels(settings, params || {});
+  if (settings._migrated) {
+    store.setSettings({ models: settings.models });
+  }
+  return res;
+});
 ipcMain.handle('stt:gemini-models', async (_e, params = {}) => {
   const settings = store.getSettings();
   const apiKey = (params && params.apiKey) || settings.apiKeys?.gemini || '';
@@ -1240,7 +1319,7 @@ ipcMain.handle('session:directive-clear', () => {
   send('session:directive', { directives: [], cleared: true });
   return { ok: true };
 });
-ipcMain.handle('settings:set', (_e, patch) => {
+async function handleSettingsSet(_e, patch) {
   sttDisabled = false;
   if (patch && patch.jobDescription !== undefined && !String(patch.jobDescription).trim()) {
     if (store.getSettings().currentDossier) {
@@ -1249,6 +1328,14 @@ ipcMain.handle('settings:set', (_e, patch) => {
     }
   }
   const next = store.setSettings(store.stripRendererPatch(patch));
+  // Refresh model catalogue when apiKeys are saved (with { forceRefresh: true })
+  if (patch && patch.apiKeys && typeof patch.apiKeys === 'object') {
+    const changedProviders = Object.keys(patch.apiKeys).filter((p) => patch.apiKeys[p] && String(patch.apiKeys[p]).trim());
+    const targets = new Set([next.provider || 'openai', ...changedProviders]);
+    for (const p of targets) {
+      refreshAndMigrateProviderCatalog(p, next, { forceRefresh: true }).catch(() => {});
+    }
+  }
   // Restart slide polling with the new interval when capturing (keeps slides).
   if (state.capturing) startSlideLoop();
   return {
@@ -1256,7 +1343,9 @@ ipcMain.handle('settings:set', (_e, patch) => {
     antigravityStatus: getAntigravityStatus(),
     codexStatus: getCodexStatus()
   };
-});
+}
+ipcMain.handle('settings:set', handleSettingsSet);
+ipcMain.handle('store:set', handleSettingsSet);
 
 ipcMain.handle('antigravity:status', () => getAntigravityStatus());
 ipcMain.handle('antigravity:login', async () => {
@@ -2518,6 +2607,9 @@ function launchApp() {
 
   createWindow();
   registerShortcuts();
+
+  const initialSettings = store.getSettings();
+  refreshAndMigrateProviderCatalog(initialSettings.provider, initialSettings, { forceRefresh: true }).catch(() => {});
 
   if (!companionServer) {
     companionServer = createCompanionServer({

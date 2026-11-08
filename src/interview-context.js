@@ -5,6 +5,14 @@
 
 // ── Question category detection ───────────────────────────────────────────────
 const { formatDossierForPrompt } = require('./company-dossier');
+const {
+  DEFAULT_BM25,
+  preprocessTranscript,
+  chunkTranscript,
+  formatChunkForContext,
+  Bm25Index,
+  searchTranscriptAndNotes,
+} = require('./transcript-retrieval');
 
 const CATEGORY_PATTERNS = {
   behavioral: [
@@ -160,14 +168,100 @@ function buildJDBlock(jd, limit = 600) {
   return 'Target Role / Job Description:\n' + clip(jd.trim().replace(/\s+/g, ' '), limit);
 }
 
+/**
+ * Search past transcript turns/chunks and user notes via BM25 (k1 = 1.5, b = 0.75).
+ */
+function searchContext(query, options = {}) {
+  const {
+    transcript = [],
+    notes = [],
+    topK = 5,
+    meetingId = 'interview',
+    bm25Options = DEFAULT_BM25,
+  } = options;
+  return searchTranscriptAndNotes({
+    transcript,
+    notes,
+    query,
+    topK,
+    meetingId,
+    bm25Options,
+  });
+}
+
+class InterviewContext {
+  constructor(options = {}) {
+    this.meetingId = options.meetingId || 'interview';
+    this.settings = options.settings || {};
+    this.transcript = Array.isArray(options.transcript) ? options.transcript.slice() : [];
+    this.notes = options.notes || [];
+    this.bm25Options = options.bm25Options || DEFAULT_BM25;
+  }
+
+  setTranscript(transcript) {
+    this.transcript = Array.isArray(transcript) ? transcript.slice() : [];
+    return this;
+  }
+
+  addTurn(turn) {
+    if (turn) this.transcript.push(turn);
+    return this;
+  }
+
+  setNotes(notes) {
+    this.notes = notes || [];
+    return this;
+  }
+
+  addNote(note) {
+    if (!Array.isArray(this.notes)) {
+      this.notes = this.notes ? [this.notes] : [];
+    }
+    if (note) this.notes.push(note);
+    return this;
+  }
+
+  getPreprocessedTranscript() {
+    return preprocessTranscript(this.transcript);
+  }
+
+  getChunks(options = {}) {
+    const cleaned = this.getPreprocessedTranscript();
+    return chunkTranscript(this.meetingId, cleaned, options);
+  }
+
+  searchContext(query, options = {}) {
+    return searchContext(query, {
+      transcript: options.transcript ?? this.transcript,
+      notes: options.notes ?? this.notes,
+      topK: options.topK ?? 5,
+      meetingId: this.meetingId,
+      bm25Options: options.bm25Options ?? this.bm25Options,
+    });
+  }
+
+  buildContextBlock(settings, mode, transcript, browserContext, options = {}) {
+    return buildInterviewContext(
+      settings ?? this.settings,
+      mode || 'say',
+      transcript ?? this.transcript,
+      browserContext,
+      {
+        ...options,
+        notes: options.notes ?? this.notes,
+      }
+    );
+  }
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 /**
- * buildInterviewContext(settings, mode, transcript)
+ * buildInterviewContext(settings, mode, transcript, browserContext, options)
  * Returns a system-prompt string with only the context fields relevant to
  * the detected interview category. Returns null for leetcode mode.
  */
-function buildInterviewContext(settings, mode, transcript, browserContext) {
+function buildInterviewContext(settings = {}, mode, transcript, browserContext, options = {}) {
   // Coding problems never need personal context
   if (mode === 'leetcode') return null;
 
@@ -268,6 +362,33 @@ function buildInterviewContext(settings, mode, transcript, browserContext) {
       break;
   }
 
+  // Optional BM25 retrieval over past transcript turns and user notes
+  const notes = options.notes ?? settings.notes ?? settings.userNotes ?? null;
+  const hasNotes = Array.isArray(notes) ? notes.length > 0 : Boolean(notes && String(notes).trim());
+  const explicitQuery = options.query || '';
+  const shouldRetrieve = Boolean(explicitQuery || hasNotes || options.enableRetrieval);
+
+  if (shouldRetrieve) {
+    const recentTurns = Array.isArray(transcript) ? transcript.slice(-3) : [];
+    const autoQuery =
+      explicitQuery ||
+      recentTurns
+        .map((t) => t.text || '')
+        .join(' ')
+        .trim();
+    if (autoQuery) {
+      const hits = searchContext(autoQuery, {
+        transcript: transcript || [],
+        notes: notes || [],
+        topK: options.topK || 3,
+      });
+      if (hits.length > 0) {
+        const hitLines = hits.map((h) => `[${h.meta && h.meta.source === 'notes' ? 'Note' : 'Transcript'}] ${h.text}`);
+        blocks.push('=== Retrieved Context (BM25) ===\n' + hitLines.join('\n\n'));
+      }
+    }
+  }
+
   if (!blocks.length) return null;
 
   const tailorNote = hasJD
@@ -276,6 +397,8 @@ function buildInterviewContext(settings, mode, transcript, browserContext) {
 
   return blocks.join('\n\n') + tailorNote;
 }
+
+const buildContextBlock = buildInterviewContext;
 
 // ── Legacy compat ─────────────────────────────────────────────────────────────
 function buildResumeContext(resumeText, jobDescription, mode) {
@@ -296,4 +419,12 @@ function buildResumeContext(resumeText, jobDescription, mode) {
   return parts.join('\n\n');
 }
 
-module.exports = { buildInterviewContext, buildResumeContext, detectCategory, parseResume };
+module.exports = {
+  InterviewContext,
+  buildInterviewContext,
+  buildContextBlock,
+  buildResumeContext,
+  searchContext,
+  detectCategory,
+  parseResume,
+};

@@ -1,94 +1,210 @@
 // Streaming Speech-to-Text via OpenAI Realtime API (WebSocket transcription session),
-// Deepgram Nova streaming, or Gemini's transcribe-live model over the Live API.
+// Deepgram Nova streaming, Soniox, Google Cloud Speech, or Gemini's transcribe-live model.
 // Falls back to batch Whisper/Gemini if streaming unavailable.
-//
-// This module manages a persistent WebSocket connection for real-time transcription
-// with sub-200ms latency, interim results, and automatic reconnection.
 
-const { looksLikeHallucination, transcribeGemini, buildVocabPrompt } = require('./stt');
+const {
+  looksLikeHallucination,
+  filterHallucination,
+  transcribeGemini,
+  buildVocabPrompt,
+  classifySttError,
+  describeSttError,
+  formatSttFailureStatus,
+  sanitizeSttTerms,
+  deepgramHintParams,
+  whisperGlossaryPrompt,
+  isGlossaryEcho
+} = require('./stt');
 const { pcmToWav } = require('./wav');
 const { GEMINI_TRANSCRIBE_LIVE_MODEL } = require('./llm');
 
+function normalizeStreamArgs(apiKeyOrOptions, maybeOptions = {}) {
+  if (apiKeyOrOptions && typeof apiKeyOrOptions === 'object') {
+    const opts = apiKeyOrOptions;
+    const apiKey = opts.apiKey || opts.key || (opts.settings && opts.settings.apiKeys && opts.settings.apiKeys[opts.provider]) || '';
+    return { apiKey, options: opts };
+  }
+  return { apiKey: apiKeyOrOptions || '', options: maybeOptions || {} };
+}
+
+function resolveTermsFromOptions(options = {}) {
+  if (options.terms !== undefined) return sanitizeSttTerms(options.terms);
+  if (options.sttDictionary !== undefined) return sanitizeSttTerms(options.sttDictionary);
+  if (options.dictionary !== undefined) return sanitizeSttTerms(options.dictionary);
+  if (options.settings && options.settings.sttDictionary !== undefined) {
+    return sanitizeSttTerms(options.settings.sttDictionary);
+  }
+  return [];
+}
+
+function createWebSocketInstance(url, wsOptions, options = {}) {
+  if (typeof options.createWebSocket === 'function') {
+    return options.createWebSocket(url, wsOptions);
+  }
+  const WsClass = options.WebSocketImpl || options.WebSocket;
+  if (typeof WsClass === 'function') {
+    return new WsClass(url, wsOptions);
+  }
+  const WebSocket = require('ws');
+  return new WebSocket(url, wsOptions);
+}
+
+function emitFatalSttFailure(instance, provider, errInput, fallbackCause = 'unknown') {
+  const detected = classifySttError(errInput);
+  const cause = detected !== 'unknown' ? detected : fallbackCause;
+  const message = describeSttError(provider, detected !== 'unknown' ? errInput : { ...(typeof errInput === 'object' ? errInput : {}), message: extractErrorMessage(errInput) });
+  const statusPayload = {
+    ...(instance.channel ? { channel: instance.channel } : {}),
+    state: 'failed',
+    status: 'failed',
+    cause,
+    provider,
+    message
+  };
+  instance.failed = true;
+  instance.failureCause = cause;
+  instance.failureStatus = statusPayload;
+  instance.connected = false;
+  instance.reconnecting = false;
+  instance._closedByUs = true;
+  if (instance._reconnectTimer) {
+    clearTimeout(instance._reconnectTimer);
+    instance._reconnectTimer = null;
+  }
+  if (typeof instance._clearKeepAlive === 'function') {
+    instance._clearKeepAlive();
+  }
+  if (typeof instance.onStatus === 'function') {
+    instance.onStatus(statusPayload);
+  }
+  if (typeof instance.onStatusChange === 'function') {
+    instance.onStatusChange(statusPayload);
+  }
+  if (typeof instance.onError === 'function') {
+    const rawHttpStatus = errInput && (errInput.status !== undefined ? errInput.status : errInput.statusCode);
+    instance.onError({
+      ...statusPayload,
+      status: typeof rawHttpStatus === 'number' ? rawHttpStatus : null,
+      httpStatus: typeof rawHttpStatus === 'number' ? rawHttpStatus : null
+    });
+  }
+  return statusPayload;
+}
+
+function extractErrorMessage(errInput) {
+  if (!errInput) return '';
+  if (typeof errInput === 'string') return errInput;
+  if (typeof errInput.message === 'string') return errInput.message;
+  if (typeof errInput.description === 'string') return errInput.description;
+  return String(errInput);
+}
+
 // ============================================================================
 // OpenAI Realtime Transcription Session (WebSocket)
-// Uses the dedicated transcription session type for lowest latency streaming STT
 // ============================================================================
 
 class OpenAIRealtimeSTT {
-  constructor(apiKey, options = {}) {
+  constructor(apiKeyOrOptions, maybeOptions = {}) {
+    const { apiKey, options } = normalizeStreamArgs(apiKeyOrOptions, maybeOptions);
     this.apiKey = apiKey;
+    this.options = options;
+    this.channel = options.channel || null;
     this.model = options.model || 'gpt-realtime-whisper';
+    this.terms = resolveTermsFromOptions(options);
+    this.glossaryPrompt = whisperGlossaryPrompt(this.terms);
     this.ws = null;
     this.connected = false;
     this.reconnecting = false;
+    this.failed = false;
+    this.failureCause = null;
+    this.failureStatus = null;
     this.onTranscript = options.onTranscript || (() => {});
     this.onInterim = options.onInterim || (() => {});
     this.onError = options.onError || (() => {});
+    this.onStatus = options.onStatus || null;
     this.onStatusChange = options.onStatusChange || (() => {});
     this._reconnectAttempts = 0;
-    this._maxReconnectAttempts = 5;
-    this._reconnectDelay = 1000;
+    this._maxReconnectAttempts = typeof options.maxReconnectAttempts === 'number' ? options.maxReconnectAttempts : 5;
+    this._reconnectDelay = typeof options.reconnectDelay === 'number' ? options.reconnectDelay : 1000;
     this._reconnectTimer = null;
     this._pendingAudio = [];
     this._sessionReady = false;
-    this._closedByUs = false; // disconnect() was called: ignore the socket's dying breaths, never reconnect
+    this._closedByUs = false;
+    this.sessionConfig = null;
   }
 
-  async connect() {
-    if (this.ws && this.connected) return;
+  connect() {
+    if (this.ws && this.connected) return this;
     this._closedByUs = false;
+    this.failed = false;
 
     try {
-      const WebSocket = require('ws');
-      // GA transcription endpoint: use ?intent=transcription (NOT ?model=)
-      // The transcription model goes inside the session config
       const url = 'wss://api.openai.com/v1/realtime?intent=transcription';
+      this.url = url;
 
-      const ws = new WebSocket(url, {
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`
+      const transcriptionConfig = {
+        model: this.model,
+        language: 'en',
+        ...(this.glossaryPrompt ? { prompt: this.glossaryPrompt } : {})
+      };
+      this.sessionConfig = {
+        type: 'session.update',
+        session: {
+          type: 'transcription',
+          input_audio_transcription: transcriptionConfig,
+          audio: {
+            input: {
+              format: { type: 'audio/pcm', rate: 24000 },
+              transcription: transcriptionConfig
+            }
+          }
         }
-      });
+      };
+
+      const ws = createWebSocketInstance(url, {
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`
+        }
+      }, this.options);
       this.ws = ws;
 
       ws.on('open', () => {
-        if (this.ws !== ws) return; // superseded by a later connect()/disconnect()
+        if (this.ws !== ws) return;
         this.connected = true;
         this._reconnectAttempts = 0;
         this.onStatusChange('connected');
-
-        // Configure the transcription session (GA format)
-        this._sendEvent({
-          type: 'session.update',
-          session: {
-            type: 'transcription',
-            audio: {
-              input: {
-                format: { type: 'audio/pcm', rate: 24000 },
-                transcription: {
-                  model: this.model,
-                  language: 'en'
-                }
-              }
-            }
-          }
-        });
+        if (this.onStatus) this.onStatus({ ...(this.channel ? { channel: this.channel } : {}), state: 'connected', provider: 'openai-realtime' });
+        this._sendEvent(this.sessionConfig);
       });
+
+      if (typeof ws.on === 'function') {
+        ws.on('unexpected-response', (_req, res) => {
+          if (this.ws !== ws || this._closedByUs) return;
+          const statusCode = res && res.statusCode;
+          emitFatalSttFailure(this, 'openai-realtime', { status: statusCode, message: `HTTP ${statusCode}` });
+          try { ws.close(); } catch (_) {}
+        });
+      }
 
       ws.on('message', (data) => {
         if (this.ws !== ws) return;
         try {
           const event = JSON.parse(data.toString());
           this._handleEvent(event);
-        } catch (e) {
-          // ignore parse errors
-        }
+        } catch (_) {}
       });
 
-      ws.on('close', (code) => {
+      ws.on('close', (code, reasonBuf) => {
         if (this.ws !== ws) return;
         this.connected = false;
         this._sessionReady = false;
+        if (this.failed || this._closedByUs) return;
+        const reason = reasonBuf ? reasonBuf.toString() : '';
+        const cause = classifySttError({ code, message: reason });
+        if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+          emitFatalSttFailure(this, 'openai-realtime', { code, message: reason }, cause);
+          return;
+        }
         this.onStatusChange('disconnected');
         if (code !== 1000 && !this.reconnecting && !this._closedByUs) {
           this._attemptReconnect();
@@ -96,16 +212,23 @@ class OpenAIRealtimeSTT {
       });
 
       ws.on('error', (err) => {
-        // Closing a socket that is still in the handshake makes `ws` emit
-        // "WebSocket was closed before the connection was established" — that
-        // is our own disconnect(), not a provider failure.
         if (this.ws !== ws || this._closedByUs) return;
-        this.onError({ provider: 'openai-realtime', message: err.message, status: null });
+        const cause = classifySttError(err);
+        if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+          emitFatalSttFailure(this, 'openai-realtime', err, cause);
+          return;
+        }
+        this.onError({ provider: 'openai-realtime', message: err.message, status: err.status || null });
       });
-
     } catch (e) {
-      this.onError({ provider: 'openai-realtime', message: e.message, status: null });
+      const cause = classifySttError(e);
+      if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+        emitFatalSttFailure(this, 'openai-realtime', e, cause);
+      } else {
+        this.onError({ provider: 'openai-realtime', message: e.message, status: null });
+      }
     }
+    return this;
   }
 
   _handleEvent(event) {
@@ -124,38 +247,36 @@ class OpenAIRealtimeSTT {
 
       case 'conversation.item.input_audio_transcription.completed':
         if (event.transcript && event.transcript.trim()) {
-          this.onTranscript(event.transcript.trim());
+          const filtered = filterHallucination(event.transcript.trim());
+          if (filtered && (!this.glossaryPrompt || !isGlossaryEcho(filtered, this.glossaryPrompt))) {
+            this.onTranscript(filtered);
+          }
         }
         break;
 
-      case 'input_audio_buffer.speech_started':
-        break;
-
-      case 'input_audio_buffer.speech_stopped':
-        break;
-
-      case 'input_audio_buffer.committed':
-        break;
-
-      case 'error':
-        this.onError({
+      case 'error': {
+        const errObj = {
           provider: 'openai-realtime',
           message: event.error?.message || 'Unknown realtime error',
           status: event.error?.code
-        });
+        };
+        const cause = classifySttError(errObj);
+        if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+          emitFatalSttFailure(this, 'openai-realtime', errObj, cause);
+        } else {
+          this.onError(errObj);
+        }
         break;
+      }
     }
   }
 
   sendAudio(pcmBuffer) {
     if (!this.connected || !this._sessionReady) {
-      // Buffer audio until session is ready (max 5 seconds worth)
       this._pendingAudio.push(pcmBuffer);
       if (this._pendingAudio.length > 80) this._pendingAudio.shift();
       return;
     }
-
-    // Resample 16kHz -> 24kHz (linear interpolation) since the API requires 24kHz
     const resampled = this._resample16to24(Buffer.from(pcmBuffer));
     const b64 = resampled.toString('base64');
     this._sendEvent({
@@ -165,7 +286,6 @@ class OpenAIRealtimeSTT {
   }
 
   _resample16to24(pcm16kHz) {
-    // Linear interpolation from 16000 Hz to 24000 Hz (ratio 2:3)
     const srcSamples = pcm16kHz.length / 2;
     const dstSamples = Math.floor(srcSamples * 24000 / 16000);
     const out = Buffer.alloc(dstSamples * 2);
@@ -194,14 +314,15 @@ class OpenAIRealtimeSTT {
   }
 
   _sendEvent(event) {
-    if (this.ws && this.ws.readyState === 1) { // WebSocket.OPEN
+    if (this.ws && this.ws.readyState === 1) {
       this.ws.send(JSON.stringify(event));
     }
   }
 
   _attemptReconnect() {
+    if (this.failed || this._closedByUs) return;
     if (this._reconnectAttempts >= this._maxReconnectAttempts) {
-      this.onError({ provider: 'openai-realtime', message: 'Max reconnection attempts reached', status: null });
+      emitFatalSttFailure(this, 'openai-realtime', { message: 'Max reconnection attempts reached' }, 'connection');
       return;
     }
     this.reconnecting = true;
@@ -210,7 +331,7 @@ class OpenAIRealtimeSTT {
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
       this.reconnecting = false;
-      if (!this._closedByUs) this.connect();
+      if (!this._closedByUs && !this.failed) this.connect();
     }, Math.min(delay, 16000));
   }
 
@@ -222,8 +343,8 @@ class OpenAIRealtimeSTT {
     this._pendingAudio = [];
     if (this.ws) {
       const ws = this.ws;
-      this.ws = null; // detach first so the resulting close/error events are ignored
-      try { ws.close(1000); } catch (e) { /* ignore */ }
+      this.ws = null;
+      try { ws.close(1000); } catch (_) {}
     }
     this.connected = false;
   }
@@ -231,37 +352,46 @@ class OpenAIRealtimeSTT {
 
 // ============================================================================
 // Deepgram Nova Streaming STT (WebSocket)
-// Ultra-low latency, supports interim results, speaker diarization, punctuation
 // ============================================================================
 
 class DeepgramStreamingSTT {
-  constructor(apiKey, options = {}) {
+  constructor(apiKeyOrOptions, maybeOptions = {}) {
+    const { apiKey, options } = normalizeStreamArgs(apiKeyOrOptions, maybeOptions);
     this.apiKey = apiKey;
+    this.options = options;
+    this.channel = options.channel || null;
     this.model = options.model || 'nova-3';
+    this.terms = resolveTermsFromOptions(options);
     this.ws = null;
+    this.url = '';
+    this.params = null;
     this.connected = false;
+    this.failed = false;
+    this.failureCause = null;
+    this.failureStatus = null;
     this.onTranscript = options.onTranscript || (() => {});
     this.onInterim = options.onInterim || (() => {});
     this.onError = options.onError || (() => {});
+    this.onStatus = options.onStatus || null;
     this.onStatusChange = options.onStatusChange || (() => {});
     this._reconnectAttempts = 0;
-    this._maxReconnectAttempts = 5;
-    this._reconnectDelay = 1000;
+    this._maxReconnectAttempts = typeof options.maxReconnectAttempts === 'number' ? options.maxReconnectAttempts : 5;
+    this._reconnectDelay = typeof options.reconnectDelay === 'number' ? options.reconnectDelay : 1000;
     this._reconnectTimer = null;
     this._keepAliveInterval = null;
-    this._committed = ''; // is_final segments not yet closed out by speech_final
-    this._closedByUs = false; // disconnect() was called: ignore the socket's dying breaths, never reconnect
+    this._committed = '';
+    this._closedByUs = false;
   }
 
-  async connect() {
-    if (this.ws && this.connected) return;
+  connect() {
+    if (this.ws && this.connected) return this;
     this._closedByUs = false;
+    this.failed = false;
 
     try {
-      const WebSocket = require('ws');
       const params = new URLSearchParams({
         model: this.model,
-        language: 'en',
+        language: this.options.language || 'en',
         smart_format: 'true',
         interim_results: 'true',
         utterance_end_ms: '1000',
@@ -273,19 +403,25 @@ class DeepgramStreamingSTT {
         punctuate: 'true'
       });
 
-      const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+      for (const [key, value] of deepgramHintParams(this.model, this.terms)) {
+        params.append(key, value);
+      }
+      this.params = params;
 
-      const ws = new WebSocket(url, {
-        headers: { 'Authorization': `Token ${this.apiKey}` }
-      });
+      const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+      this.url = url;
+
+      const ws = createWebSocketInstance(url, {
+        headers: { Authorization: `Token ${this.apiKey}` }
+      }, this.options);
       this.ws = ws;
 
       ws.on('open', () => {
-        if (this.ws !== ws) return; // superseded by a later connect()/disconnect()
+        if (this.ws !== ws) return;
         this.connected = true;
         this._reconnectAttempts = 0;
         this.onStatusChange('connected');
-        // Keep-alive every 3 seconds to prevent timeout
+        if (this.onStatus) this.onStatus({ ...(this.channel ? { channel: this.channel } : {}), state: 'connected', provider: 'deepgram' });
         this._clearKeepAlive();
         this._keepAliveInterval = setInterval(() => {
           if (this.ws && this.ws.readyState === 1) {
@@ -294,33 +430,56 @@ class DeepgramStreamingSTT {
         }, 3000);
       });
 
+      if (typeof ws.on === 'function') {
+        ws.on('unexpected-response', (_req, res) => {
+          if (this.ws !== ws || this._closedByUs) return;
+          const statusCode = res && res.statusCode;
+          emitFatalSttFailure(this, 'deepgram', { status: statusCode, message: `HTTP ${statusCode}` });
+          try { ws.close(); } catch (_) {}
+        });
+      }
+
       ws.on('message', (data) => {
         if (this.ws !== ws) return;
         try {
           const msg = JSON.parse(data.toString());
           this._handleMessage(msg);
-        } catch (e) { /* ignore */ }
+        } catch (_) {}
       });
 
-      ws.on('close', (code) => {
+      ws.on('close', (code, reasonBuf) => {
         if (this.ws !== ws) return;
         this.connected = false;
         this._clearKeepAlive();
+        if (this.failed || this._closedByUs) return;
+        const reason = reasonBuf ? reasonBuf.toString() : '';
+        const cause = classifySttError({ code, message: reason });
+        if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+          emitFatalSttFailure(this, 'deepgram', { code, message: reason }, cause);
+          return;
+        }
         this.onStatusChange('disconnected');
         if (code !== 1000 && !this._closedByUs) this._attemptReconnect();
       });
 
       ws.on('error', (err) => {
-        // Closing a socket that is still in the handshake makes `ws` emit
-        // "WebSocket was closed before the connection was established" — that
-        // is our own disconnect(), not a provider failure.
         if (this.ws !== ws || this._closedByUs) return;
-        this.onError({ provider: 'deepgram', message: err.message, status: null });
+        const cause = classifySttError(err);
+        if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+          emitFatalSttFailure(this, 'deepgram', err, cause);
+          return;
+        }
+        this.onError({ provider: 'deepgram', message: err.message, status: err.status || null });
       });
-
     } catch (e) {
-      this.onError({ provider: 'deepgram', message: e.message, status: null });
+      const cause = classifySttError(e);
+      if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+        emitFatalSttFailure(this, 'deepgram', e, cause);
+      } else {
+        this.onError({ provider: 'deepgram', message: e.message, status: null });
+      }
     }
+    return this;
   }
 
   _handleMessage(msg) {
@@ -329,13 +488,11 @@ class DeepgramStreamingSTT {
       if (!alt) return;
       const text = (alt.transcript || '').trim();
 
-      // Deepgram splits one spoken sentence into several is_final segments and only sets
-      // speech_final on the last one. Accumulate the is_final pieces and emit a single turn
-      // at speech_final so a sentence is not fragmented across transcript rows.
       if (msg.speech_final) {
         const full = ((this._committed || '') + ' ' + text).trim();
         this._committed = '';
-        if (full && !looksLikeHallucination(full)) this.onTranscript(full);
+        const filtered = filterHallucination(full);
+        if (filtered) this.onTranscript(filtered);
         this.onInterim('');
         return;
       }
@@ -347,18 +504,27 @@ class DeepgramStreamingSTT {
         this.onInterim(((this._committed || '') + ' ' + text).trim());
       }
     } else if (msg.type === 'UtteranceEnd') {
-      // Safety net: if endpointing never produced a speech_final, flush whatever is_final
-      // segments we accumulated so the turn is not silently dropped.
       this._flushCommitted();
     } else if (msg.type === 'Error') {
-      this.onError({ provider: 'deepgram', message: msg.description || msg.message, status: msg.variant });
+      const errObj = {
+        provider: 'deepgram',
+        message: msg.description || msg.message || 'Deepgram error',
+        status: msg.status || msg.code || msg.variant
+      };
+      const cause = classifySttError(errObj);
+      if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+        emitFatalSttFailure(this, 'deepgram', errObj, cause);
+      } else {
+        this.onError(errObj);
+      }
     }
   }
 
   _flushCommitted() {
     const full = (this._committed || '').trim();
     this._committed = '';
-    if (full && !looksLikeHallucination(full)) this.onTranscript(full);
+    const filtered = filterHallucination(full);
+    if (filtered) this.onTranscript(filtered);
     this.onInterim('');
   }
 
@@ -373,13 +539,17 @@ class DeepgramStreamingSTT {
   }
 
   _attemptReconnect() {
+    if (this.failed || this._closedByUs) return;
     if (this._reconnectAttempts >= this._maxReconnectAttempts) {
-      this.onError({ provider: 'deepgram', message: 'Max reconnection attempts reached', status: null });
+      emitFatalSttFailure(this, 'deepgram', { message: 'Max reconnection attempts reached' }, 'connection');
       return;
     }
     this._reconnectAttempts++;
     const delay = this._reconnectDelay * Math.pow(2, this._reconnectAttempts - 1);
-    this._reconnectTimer = setTimeout(() => { this._reconnectTimer = null; if (!this._closedByUs) this.connect(); }, Math.min(delay, 16000));
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (!this._closedByUs && !this.failed) this.connect();
+    }, Math.min(delay, 16000));
   }
 
   disconnect() {
@@ -389,51 +559,367 @@ class DeepgramStreamingSTT {
     this._clearKeepAlive();
     if (this.ws) {
       const ws = this.ws;
-      this.ws = null; // detach first so the resulting close/error events are ignored
-      // Send CloseStream message for clean shutdown (only meaningful on an open socket)
-      if (ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (e) { /* ignore */ } }
-      try { ws.close(1000); } catch (e) { /* ignore */ }
+      this.ws = null;
+      if (ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (_) {} }
+      try { ws.close(1000); } catch (_) {}
     }
     this.connected = false;
   }
 }
 
-
 // ============================================================================
-// Gemini Live transcription (gemini-*-transcribe-live over the Live API)
-// Sends 16 kHz PCM as-is; the server streams interimInputTranscription (the
-// full hypothesis so far, refreshed every ~0.5s) and inputTranscription (final,
-// on a pause). Sessions are capped at 10 minutes, so an unexpected close is
-// normal — audio is buffered while the socket reconnects.
+// Soniox Streaming STT (WebSocket)
 // ============================================================================
 
-const GEMINI_LIVE_CONNECT_TIMEOUT_MS = 15000;
-const GEMINI_LIVE_MAX_PENDING_CHUNKS = 100; // ~10s of 100ms chunks while (re)connecting
-
-class GeminiLiveSTT {
-  constructor(apiKey, options = {}) {
+class SonioxStreamingSTT {
+  constructor(apiKeyOrOptions, maybeOptions = {}) {
+    const { apiKey, options } = normalizeStreamArgs(apiKeyOrOptions, maybeOptions);
     this.apiKey = apiKey;
-    this.model = options.model || GEMINI_TRANSCRIBE_LIVE_MODEL;
-    this.vocabulary = options.vocabulary || [];
-    this.session = null;
+    this.options = options;
+    this.channel = options.channel || null;
+    this.model = options.model || 'stt-rt-preview';
+    this.terms = resolveTermsFromOptions(options);
+    this.ws = null;
     this.connected = false;
+    this.failed = false;
+    this.failureCause = null;
+    this.failureStatus = null;
     this.onTranscript = options.onTranscript || (() => {});
     this.onInterim = options.onInterim || (() => {});
     this.onError = options.onError || (() => {});
+    this.onStatus = options.onStatus || null;
     this.onStatusChange = options.onStatusChange || (() => {});
     this._reconnectAttempts = 0;
-    this._maxReconnectAttempts = 5;
-    this._reconnectDelay = 1000;
+    this._maxReconnectAttempts = typeof options.maxReconnectAttempts === 'number' ? options.maxReconnectAttempts : 5;
+    this._reconnectDelay = typeof options.reconnectDelay === 'number' ? options.reconnectDelay : 1000;
+    this._reconnectTimer = null;
+    this._closedByUs = false;
+    this.initialConfig = {
+      api_key: this.apiKey,
+      model: this.model,
+      audio_format: 'pcm_s16le',
+      sample_rate: 16000,
+      num_channels: 1,
+      enable_endpoint_detection: true,
+      ...(this.terms.length > 0 ? { context: { terms: this.terms } } : {})
+    };
+    this.config = this.initialConfig;
+  }
+
+  connect() {
+    if (this.ws && this.connected) return this;
+    this._closedByUs = false;
+    this.failed = false;
+
+    try {
+      const url = this.options.url || 'wss://stt-rt.soniox.com/transcribe-websocket';
+      this.url = url;
+      const ws = createWebSocketInstance(url, {}, this.options);
+      this.ws = ws;
+
+      ws.on('open', () => {
+        if (this.ws !== ws) return;
+        this.connected = true;
+        this._reconnectAttempts = 0;
+        if (ws.readyState === 1 || typeof ws.send === 'function') {
+          ws.send(JSON.stringify(this.initialConfig));
+        }
+        this.onStatusChange('connected');
+        if (this.onStatus) this.onStatus({ ...(this.channel ? { channel: this.channel } : {}), state: 'connected', provider: 'soniox' });
+      });
+
+      if (typeof ws.on === 'function') {
+        ws.on('unexpected-response', (_req, res) => {
+          if (this.ws !== ws || this._closedByUs) return;
+          const statusCode = res && res.statusCode;
+          emitFatalSttFailure(this, 'soniox', { status: statusCode, message: `HTTP ${statusCode}` });
+          try { ws.close(); } catch (_) {}
+        });
+      }
+
+      ws.on('message', (data) => {
+        if (this.ws !== ws) return;
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.error_code || msg.error_message) {
+            const errObj = { status: msg.error_code, message: msg.error_message || 'Soniox error' };
+            const cause = classifySttError(errObj);
+            if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+              emitFatalSttFailure(this, 'soniox', errObj, cause);
+              return;
+            }
+            this.onError({ provider: 'soniox', ...errObj });
+            return;
+          }
+          if (Array.isArray(msg.tokens)) {
+            let finalText = '';
+            let interimText = '';
+            for (const tok of msg.tokens) {
+              if (!tok || typeof tok.text !== 'string') continue;
+              if (tok.is_final) finalText += tok.text;
+              else interimText += tok.text;
+            }
+            if (finalText.trim()) {
+              const filtered = filterHallucination(finalText.trim());
+              if (filtered) this.onTranscript(filtered);
+            }
+            if (interimText.trim()) {
+              this.onInterim(interimText.trim());
+            }
+          }
+        } catch (_) {}
+      });
+
+      ws.on('close', (code, reasonBuf) => {
+        if (this.ws !== ws) return;
+        this.connected = false;
+        if (this.failed || this._closedByUs) return;
+        const reason = reasonBuf ? reasonBuf.toString() : '';
+        const cause = classifySttError({ code, message: reason });
+        if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+          emitFatalSttFailure(this, 'soniox', { code, message: reason }, cause);
+          return;
+        }
+        this.onStatusChange('disconnected');
+        if (code !== 1000 && !this._closedByUs) this._attemptReconnect();
+      });
+
+      ws.on('error', (err) => {
+        if (this.ws !== ws || this._closedByUs) return;
+        const cause = classifySttError(err);
+        if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+          emitFatalSttFailure(this, 'soniox', err, cause);
+          return;
+        }
+        this.onError({ provider: 'soniox', message: err.message, status: err.status || null });
+      });
+    } catch (e) {
+      const cause = classifySttError(e);
+      if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+        emitFatalSttFailure(this, 'soniox', e, cause);
+      } else {
+        this.onError({ provider: 'soniox', message: e.message, status: null });
+      }
+    }
+    return this;
+  }
+
+  _attemptReconnect() {
+    if (this.failed || this._closedByUs) return;
+    if (this._reconnectAttempts >= this._maxReconnectAttempts) {
+      emitFatalSttFailure(this, 'soniox', { message: 'Max reconnection attempts reached' }, 'connection');
+      return;
+    }
+    this._reconnectAttempts++;
+    const delay = this._reconnectDelay * Math.pow(2, this._reconnectAttempts - 1);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (!this._closedByUs && !this.failed) this.connect();
+    }, Math.min(delay, 16000));
+  }
+
+  sendAudio(pcmBuffer) {
+    if (this.ws && this.ws.readyState === 1) {
+      this.ws.send(Buffer.from(pcmBuffer));
+    }
+  }
+
+  disconnect() {
+    this._closedByUs = true;
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      try { ws.close(1000); } catch (_) {}
+    }
+    this.connected = false;
+  }
+}
+
+// ============================================================================
+// Google Cloud Speech Streaming STT
+// ============================================================================
+
+class GoogleCloudStreamingSTT {
+  constructor(apiKeyOrOptions, maybeOptions = {}) {
+    const { apiKey, options } = normalizeStreamArgs(apiKeyOrOptions, maybeOptions);
+    this.apiKey = apiKey;
+    this.options = options;
+    this.channel = options.channel || null;
+    this.model = options.model || 'latest_long';
+    this.language = options.language || 'en-US';
+    this.terms = resolveTermsFromOptions(options);
+    this.connected = false;
+    this.failed = false;
+    this.failureCause = null;
+    this.failureStatus = null;
+    this.onTranscript = options.onTranscript || (() => {});
+    this.onInterim = options.onInterim || (() => {});
+    this.onError = options.onError || (() => {});
+    this.onStatus = options.onStatus || null;
+    this.onStatusChange = options.onStatusChange || (() => {});
+    this._closedByUs = false;
+    this.config = {
+      encoding: 'LINEAR16',
+      sampleRateHertz: 16000,
+      languageCode: this.language,
+      enableAutomaticPunctuation: true,
+      model: this.model,
+      ...(this.terms.length > 0 ? { speechContexts: [{ phrases: this.terms }] } : {})
+    };
+    this.streamingConfig = {
+      config: this.config,
+      interimResults: true
+    };
+    this.stream = null;
+  }
+
+  connect() {
+    this._closedByUs = false;
+    this.failed = false;
+    try {
+      const gClient = this.options.speechClient || this.options.client;
+      if (typeof this.options.createRecognizeStream === 'function') {
+        this.stream = this.options.createRecognizeStream(this.streamingConfig);
+      } else if (gClient && typeof gClient.streamingRecognize === 'function') {
+        this.stream = gClient.streamingRecognize(this.streamingConfig);
+      }
+      this.connected = true;
+      this.onStatusChange('connected');
+      if (this.onStatus) this.onStatus({ ...(this.channel ? { channel: this.channel } : {}), state: 'connected', provider: 'google' });
+      if (this.stream && typeof this.stream.on === 'function') {
+        this.stream.on('data', (data) => {
+          const result = data && data.results && data.results[0];
+          const alt = result && result.alternatives && result.alternatives[0];
+          if (!alt || !alt.transcript) return;
+          if (result.isFinal) {
+            const filtered = filterHallucination(alt.transcript.trim());
+            if (filtered) this.onTranscript(filtered);
+          } else {
+            this.onInterim(alt.transcript.trim());
+          }
+        });
+        this.stream.on('error', (err) => {
+          if (this._closedByUs) return;
+          const cause = classifySttError(err);
+          if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+            emitFatalSttFailure(this, 'google', err, cause);
+          } else {
+            this.onError({ provider: 'google', message: err.message, status: err.code || null });
+          }
+        });
+      }
+    } catch (e) {
+      const cause = classifySttError(e);
+      if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+        emitFatalSttFailure(this, 'google', e, cause);
+      } else {
+        this.onError({ provider: 'google', message: e.message, status: null });
+      }
+    }
+    return this;
+  }
+
+  sendAudio(pcmBuffer) {
+    if (this.stream && typeof this.stream.write === 'function') {
+      this.stream.write(Buffer.from(pcmBuffer));
+    }
+  }
+
+  disconnect() {
+    this._closedByUs = true;
+    this.connected = false;
+    if (this.stream && typeof this.stream.end === 'function') {
+      try { this.stream.end(); } catch (_) {}
+    }
+    this.stream = null;
+  }
+}
+
+// ============================================================================
+// Starter Functions (startDeepgramStream, startSonioxStream, startGoogleCloudStream, startOpenAIRealtimeStream)
+// ============================================================================
+
+function attachStopAliases(stt) {
+  if (typeof stt.stop !== 'function') {
+    stt.stop = () => stt.disconnect();
+  }
+  if (typeof stt.close !== 'function') {
+    stt.close = () => stt.disconnect();
+  }
+  return stt;
+}
+
+function startDeepgramStream(apiKeyOrOptions, maybeOptions = {}) {
+  const stt = attachStopAliases(new DeepgramStreamingSTT(apiKeyOrOptions, maybeOptions));
+  if (stt.options.autoConnect !== false) {
+    stt.connect();
+  }
+  return stt;
+}
+
+function startSonioxStream(apiKeyOrOptions, maybeOptions = {}) {
+  const stt = attachStopAliases(new SonioxStreamingSTT(apiKeyOrOptions, maybeOptions));
+  if (stt.options.autoConnect !== false) {
+    stt.connect();
+  }
+  return stt;
+}
+
+function startGoogleCloudStream(apiKeyOrOptions, maybeOptions = {}) {
+  const stt = attachStopAliases(new GoogleCloudStreamingSTT(apiKeyOrOptions, maybeOptions));
+  if (stt.options.autoConnect !== false) {
+    stt.connect();
+  }
+  return stt;
+}
+
+function startOpenAIRealtimeStream(apiKeyOrOptions, maybeOptions = {}) {
+  const stt = attachStopAliases(new OpenAIRealtimeSTT(apiKeyOrOptions, maybeOptions));
+  if (stt.options.autoConnect !== false) {
+    stt.connect();
+  }
+  return stt;
+}
+
+// ============================================================================
+// Gemini Live transcription (gemini-*-transcribe-live over the Live API)
+// ============================================================================
+
+const GEMINI_LIVE_CONNECT_TIMEOUT_MS = 15000;
+const GEMINI_LIVE_MAX_PENDING_CHUNKS = 100;
+
+class GeminiLiveSTT {
+  constructor(apiKeyOrOptions, maybeOptions = {}) {
+    const { apiKey, options } = normalizeStreamArgs(apiKeyOrOptions, maybeOptions);
+    this.apiKey = apiKey;
+    this.options = options;
+    this.channel = options.channel || null;
+    this.model = options.model || GEMINI_TRANSCRIBE_LIVE_MODEL;
+    const dictTerms = resolveTermsFromOptions(options);
+    this.vocabulary = dictTerms.length > 0 ? dictTerms : (options.vocabulary || []);
+    this.session = null;
+    this.connected = false;
+    this.failed = false;
+    this.failureCause = null;
+    this.failureStatus = null;
+    this.onTranscript = options.onTranscript || (() => {});
+    this.onInterim = options.onInterim || (() => {});
+    this.onError = options.onError || (() => {});
+    this.onStatus = options.onStatus || null;
+    this.onStatusChange = options.onStatusChange || (() => {});
+    this._reconnectAttempts = 0;
+    this._maxReconnectAttempts = typeof options.maxReconnectAttempts === 'number' ? options.maxReconnectAttempts : 5;
+    this._reconnectDelay = typeof options.reconnectDelay === 'number' ? options.reconnectDelay : 1000;
     this._reconnectTimer = null;
     this._pendingAudio = [];
     this._lastInterim = '';
     this._closedByUs = false;
     this._connecting = false;
-    this._conn = null; // token for the current socket so a stale one can't drive callbacks
-    // Injectable for tests; production lazily loads @google/genai.
-    this._createClient = options.createClient || ((apiKey) => {
+    this._conn = null;
+    this._createClient = options.createClient || ((key) => {
       const { GoogleGenAI } = require('@google/genai');
-      return new GoogleGenAI({ apiKey });
+      return new GoogleGenAI({ apiKey: key });
     });
   }
 
@@ -441,13 +927,11 @@ class GeminiLiveSTT {
     if (this.connected || this._connecting) return;
     this._connecting = true;
     this._closedByUs = false;
+    this.failed = false;
     const conn = { closed: false };
     this._conn = conn;
     try {
       const ai = this._createClient(this.apiKey);
-      // The SDK's connect() only resolves after setupComplete and never rejects:
-      // a rejected session (bad key, unknown model, quota) arrives as a socket
-      // close carrying the reason, so race it against that close and a timeout.
       let rejectClosed = () => {};
       const closedEarly = new Promise((_, reject) => { rejectClosed = reject; });
       const attempt = ai.live.connect({
@@ -455,7 +939,7 @@ class GeminiLiveSTT {
         config: {
           responseModalities: ['TEXT'],
           inputAudioTranscription: {
-            languageCodes: [], // auto-detect, like the batch Gemini path
+            languageCodes: [],
             customVocabulary: this.vocabulary.slice(0, 1000)
           }
         },
@@ -463,6 +947,11 @@ class GeminiLiveSTT {
           onmessage: (msg) => { if (this._conn === conn) this._handleMessage(msg); },
           onerror: (err) => {
             if (this._conn !== conn) return;
+            const cause = classifySttError(err);
+            if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+              emitFatalSttFailure(this, 'gemini-live', err, cause);
+              return;
+            }
             this.onError({ provider: 'gemini-live', message: (err && err.message) || 'Gemini Live connection error', status: null });
           },
           onclose: (evt) => {
@@ -479,21 +968,25 @@ class GeminiLiveSTT {
       try {
         this.session = await Promise.race([attempt, closedEarly, timeout]);
       } finally {
-        clearTimeout(timer); // don't keep the process alive for a race that already settled
+        clearTimeout(timer);
       }
-      if (this._conn !== conn) { try { this.session.close(); } catch (e) { /* ignore */ } return; } // disconnect() raced us
+      if (this._conn !== conn) { try { this.session.close(); } catch (_) {} return; }
       this.connected = true;
       this._reconnectAttempts = 0;
       this.onStatusChange('connected');
+      if (this.onStatus) this.onStatus({ ...(this.channel ? { channel: this.channel } : {}), state: 'connected', provider: 'gemini-live' });
       this._flushPendingAudio();
     } catch (e) {
       this.session = null;
       const message = (e && e.message) || String(e);
-      // Rejected sessions carry the API error in the close reason ("API key not
-      // valid", "... is not found for API version ...", quota text) — surface a
-      // status so the shared error mapping in stt.js/llm.js reads it the same.
       const status = /not found|not supported/i.test(message) ? 404 : (/quota|rate limit|resource_exhausted/i.test(message) ? 429 : null);
-      this.onError({ provider: 'gemini-live', message, status });
+      const errObj = { provider: 'gemini-live', message, status };
+      const cause = classifySttError(errObj);
+      if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+        emitFatalSttFailure(this, 'gemini-live', errObj, cause);
+      } else {
+        this.onError(errObj);
+      }
     } finally {
       this._connecting = false;
     }
@@ -508,18 +1001,23 @@ class GeminiLiveSTT {
     } else if (sc.inputTranscription && typeof sc.inputTranscription.text === 'string') {
       const text = sc.inputTranscription.text.trim();
       this._lastInterim = '';
-      if (text && !looksLikeHallucination(text)) this.onTranscript(text);
+      const filtered = filterHallucination(text);
+      if (filtered) this.onTranscript(filtered);
       this.onInterim('');
     }
   }
 
-  // Server-initiated close: the 10-minute session cap, or a network blip.
   _onClosed(evt) {
     this.connected = false;
     this.session = null;
+    if (this.failed || this._closedByUs) return;
+    const reason = (evt && evt.reason) || '';
+    const cause = classifySttError({ code: evt && evt.code, message: reason });
+    if (cause === 'quota' || cause === 'auth' || cause === 'no mic') {
+      emitFatalSttFailure(this, 'gemini-live', { code: evt && evt.code, message: reason }, cause);
+      return;
+    }
     this.onStatusChange('disconnected');
-    // Whatever the model had recognised so far is the best transcript of the
-    // utterance the close cut off; don't let it vanish.
     this._flushInterimAsFinal();
     if (this._closedByUs) return;
     this._attemptReconnect();
@@ -528,14 +1026,13 @@ class GeminiLiveSTT {
   _flushInterimAsFinal() {
     const text = (this._lastInterim || '').trim();
     this._lastInterim = '';
-    if (text && !looksLikeHallucination(text)) this.onTranscript(text);
+    const filtered = filterHallucination(text);
+    if (filtered) this.onTranscript(filtered);
     this.onInterim('');
   }
 
   sendAudio(pcmBuffer) {
     if (!this.connected || !this.session) {
-      // Buffer audio until the session is (re)connected so the words spoken
-      // across the 10-minute rollover are not lost.
       this._pendingAudio.push(Buffer.from(pcmBuffer));
       if (this._pendingAudio.length > GEMINI_LIVE_MAX_PENDING_CHUNKS) this._pendingAudio.shift();
       return;
@@ -556,24 +1053,28 @@ class GeminiLiveSTT {
   }
 
   _attemptReconnect() {
+    if (this.failed || this._closedByUs) return;
     if (this._reconnectAttempts >= this._maxReconnectAttempts) {
-      this.onError({ provider: 'gemini-live', message: 'Max reconnection attempts reached', status: null });
+      emitFatalSttFailure(this, 'gemini-live', { message: 'Max reconnection attempts reached' }, 'connection');
       return;
     }
     this._reconnectAttempts++;
     const delay = this._reconnectDelay * Math.pow(2, this._reconnectAttempts - 1);
-    this._reconnectTimer = setTimeout(() => { this._reconnectTimer = null; if (!this._closedByUs) this.connect(); }, Math.min(delay, 16000));
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (!this._closedByUs && !this.failed) this.connect();
+    }, Math.min(delay, 16000));
   }
 
   disconnect() {
     this._closedByUs = true;
-    this._conn = null; // orphan any in-flight connect so its callbacks are ignored
+    this._conn = null;
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this._pendingAudio = [];
     this._flushInterimAsFinal();
     if (this.session) {
-      try { this.session.sendRealtimeInput({ audioStreamEnd: true }); } catch (e) { /* ignore */ }
-      try { this.session.close(); } catch (e) { /* ignore */ }
+      try { this.session.sendRealtimeInput({ audioStreamEnd: true }); } catch (_) {}
+      try { this.session.close(); } catch (_) {}
       this.session = null;
     }
     this.connected = false;
@@ -581,11 +1082,10 @@ class GeminiLiveSTT {
 }
 
 // ============================================================================
-// Batch STT (enhanced version of the original — used as fallback)
-// Supports Whisper and Gemini with better error handling
+// Batch STT
 // ============================================================================
 
-async function transcribeBatchOpenAI(apiKey, wav, model) {
+async function transcribeBatchOpenAI(apiKey, wav, model, prompt = '') {
   const OpenAI = require('openai');
   const toFile = OpenAI.toFile || require('openai/uploads').toFile;
   const client = new OpenAI({ apiKey });
@@ -594,74 +1094,107 @@ async function transcribeBatchOpenAI(apiKey, wav, model) {
     file,
     model: model || 'whisper-1',
     response_format: 'text',
-    language: 'en'
+    language: 'en',
+    ...(prompt ? { prompt } : {})
   });
   return (typeof res === 'string' ? res : res.text || '').trim();
 }
 
-// Shared with the batch path in stt.js so both use the transcribe model.
 const transcribeBatchGemini = transcribeGemini;
 
 // ============================================================================
 // Unified Streaming STT Factory
-// Creates the best available streaming STT based on the user's API keys.
-// Priority: Deepgram (lowest latency) > OpenAI Realtime > Batch fallback
 // ============================================================================
 
-function createStreamingSTT(settings, channel, callbacks) {
+function createStreamingSTT(settings = {}, channel, callbacks = {}) {
   const keys = settings.apiKeys || {};
   const selectedProvider = settings.sttProvider || 'auto';
-  const { onTranscript, onInterim, onError, onStatusChange } = callbacks;
+  const terms = sanitizeSttTerms(settings.sttDictionary || settings.terms);
+  const { onTranscript, onInterim, onError, onStatusChange, onStatus } = callbacks;
+
+  const forwardStatus = (status) => {
+    if (onStatusChange) onStatusChange(channel, status);
+    if (onStatus) {
+      if (status && typeof status === 'object') onStatus({ channel, ...status });
+      else onStatus({ channel, state: status });
+    }
+  };
 
   if (selectedProvider === 'local') {
     return { type: 'batch', provider: selectedProvider, instance: null };
   }
 
-  // Priority 1: Deepgram (purpose-built for streaming STT, lowest latency)
+  // Priority 1: Deepgram
   if ((selectedProvider === 'auto' || selectedProvider === 'deepgram') && keys.deepgram) {
     const stt = new DeepgramStreamingSTT(keys.deepgram, {
-      model: 'nova-3',
-      onTranscript: (text) => onTranscript(channel, text),
-      onInterim: (text) => onInterim(channel, text),
+      channel,
+      model: settings.deepgramModel || 'nova-3',
+      terms,
+      onTranscript: (text) => onTranscript && onTranscript(channel, text),
+      onInterim: (text) => onInterim && onInterim(channel, text),
       onError,
-      onStatusChange: (status) => onStatusChange(channel, status)
+      onStatusChange: forwardStatus
     });
     return { type: 'streaming', provider: 'deepgram', instance: stt };
   }
 
-  // Priority 2: OpenAI Realtime API (excellent quality, slightly higher latency)
+  // Priority 2: Soniox (when explicitly selected)
+  if (selectedProvider === 'soniox' && keys.soniox) {
+    const stt = new SonioxStreamingSTT(keys.soniox, {
+      channel,
+      terms,
+      onTranscript: (text) => onTranscript && onTranscript(channel, text),
+      onInterim: (text) => onInterim && onInterim(channel, text),
+      onError,
+      onStatusChange: forwardStatus
+    });
+    return { type: 'streaming', provider: 'soniox', instance: stt };
+  }
+
+  // Priority 3: Google Cloud Speech (when explicitly selected)
+  if ((selectedProvider === 'google' || selectedProvider === 'google-cloud') && keys.google) {
+    const stt = new GoogleCloudStreamingSTT(keys.google, {
+      channel,
+      terms,
+      onTranscript: (text) => onTranscript && onTranscript(channel, text),
+      onInterim: (text) => onInterim && onInterim(channel, text),
+      onError,
+      onStatusChange: forwardStatus
+    });
+    return { type: 'streaming', provider: 'google', instance: stt };
+  }
+
+  // Priority 4: OpenAI Realtime API
   if ((selectedProvider === 'auto' || selectedProvider === 'openai') && keys.openai) {
     const stt = new OpenAIRealtimeSTT(keys.openai, {
-      model: 'gpt-realtime-whisper', // only this model gives true streaming deltas
-      onTranscript: (text) => onTranscript(channel, text),
-      onInterim: (text) => onInterim(channel, text),
+      channel,
+      model: 'gpt-realtime-whisper',
+      terms,
+      onTranscript: (text) => onTranscript && onTranscript(channel, text),
+      onInterim: (text) => onInterim && onInterim(channel, text),
       onError,
-      onStatusChange: (status) => onStatusChange(channel, status)
+      onStatusChange: forwardStatus
     });
     return { type: 'streaming', provider: 'openai-realtime', instance: stt };
   }
 
-  // Priority 3: Gemini transcribe-live (word-by-word interims; one long-lived
-  // session per channel, so it sidesteps the per-request quota that bites the
-  // batch Gemini path). Opt-in only: its interim hypotheses get rewritten as
-  // it goes, which reads as glitchy next to Deepgram, so 'auto' with a
-  // Gemini-only key stays on batch. A failure here falls back to batch Gemini
-  // in main.js.
+  // Priority 5: Gemini transcribe-live
   if (selectedProvider === 'gemini' && keys.gemini) {
+    const vocab = terms.length > 0
+      ? terms
+      : buildVocabPrompt(settings).split(',').map((t) => t.trim()).filter(Boolean);
     const stt = new GeminiLiveSTT(keys.gemini, {
-      vocabulary: buildVocabPrompt(settings).split(',').map((t) => t.trim()).filter(Boolean),
-      onTranscript: (text) => onTranscript(channel, text),
-      onInterim: (text) => onInterim(channel, text),
+      channel,
+      terms,
+      vocabulary: vocab,
+      onTranscript: (text) => onTranscript && onTranscript(channel, text),
+      onInterim: (text) => onInterim && onInterim(channel, text),
       onError,
-      onStatusChange: (status) => onStatusChange(channel, status)
+      onStatusChange: forwardStatus
     });
     return { type: 'streaming', provider: 'gemini-live', instance: stt };
   }
 
-  // Priority 4: Batch fallback (Gemini or Whisper via old system). Custom has
-  // no streaming protocol of its own (an arbitrary OpenAI-compatible endpoint
-  // isn't assumed to speak Realtime), so an explicit 'custom' choice lands
-  // here too and is served by createSTT()'s batch chain — same as local/gemini.
   return {
     type: 'batch',
     provider: selectedProvider === 'custom' ? 'custom' : (selectedProvider === 'auto' && keys.gemini ? 'gemini' : 'none'),
@@ -672,8 +1205,21 @@ function createStreamingSTT(settings, channel, callbacks) {
 module.exports = {
   OpenAIRealtimeSTT,
   DeepgramStreamingSTT,
+  SonioxStreamingSTT,
+  GoogleCloudStreamingSTT,
   GeminiLiveSTT,
+  startDeepgramStream,
+  startSonioxStream,
+  startGoogleCloudStream,
+  startOpenAIRealtimeStream,
   createStreamingSTT,
   transcribeBatchOpenAI,
-  transcribeBatchGemini
+  transcribeBatchGemini,
+  classifySttError,
+  describeSttError,
+  formatSttFailureStatus,
+  sanitizeSttTerms,
+  deepgramHintParams,
+  whisperGlossaryPrompt,
+  isGlossaryEcho
 };

@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('cue', {
   platform,
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsSet: (patch) => ipcRenderer.invoke('settings:set', patch),
+  setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
   listModels: (params) => ipcRenderer.invoke('models:list', params),
   listGeminiSTTModels: (params) => ipcRenderer.invoke('stt:gemini-models', params),
   testConnection: (params) => ipcRenderer.invoke('llm:test-connection', params),
@@ -79,7 +80,7 @@ contextBridge.exposeInMainWorld('cue', {
   log: (msg) => ipcRenderer.send('log', msg),
   on: (channel, cb) => {
     const allowed = [
-      'capture:state', 'llm:start', 'llm:thought', 'llm:token', 'llm:done', 'llm:error', 'status',
+      'capture:state', 'llm:start', 'llm:stream-start', 'llm:thought', 'llm:token', 'llm:done', 'llm:error', 'status',
       'transcript', 'transcript:restore', 'stt:interim', 'stt:final', 'stt:status',
       'vad:state', 'applink:consent-request', 'hide:toggle', 'whisper:download-progress',
       'whisper:models-changed', 'publik:state', 'slides:update',

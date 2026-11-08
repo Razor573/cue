@@ -12,6 +12,8 @@ try {
 }
 const { createFileStore } = require('./settings-store-core');
 const { normalizeBaseUrl } = require('./openai-compatible');
+const { sanitizeSttTerms, MAX_STT_DICTIONARY_TERMS } = require('./stt');
+const { migrateSettingsModels } = require('./llm');
 
 const fileStore = createFileStore(() => (app ? app.getPath('userData') : require('os').tmpdir()), 'cue-data.json');
 
@@ -39,6 +41,7 @@ const DEFAULTS = {
   provider: 'openai',
   rotationProviders: ['gemini', 'vertex', 'antigravity', 'codex'],
   sttProvider: 'auto',
+  sttDictionary: [],
   localWhisper: {
     modelId: 'base.en',
     language: 'auto',
@@ -203,12 +206,16 @@ function deepMerge(base, over) {
 function load() {
   if (data) {
     data.rotationProviders = sanitizeRotationProviders(data.rotationProviders, data.provider);
+    data.sttDictionary = sanitizeSttTerms(data.sttDictionary);
+    migrateSettingsModels(data);
     return data;
   }
   const loaded = fileStore.load();
   data = deepMerge(DEFAULTS, loaded ? loaded.data : {});
   data.rotationProviders = sanitizeRotationProviders(data.rotationProviders, data.provider);
-  if (loaded && loaded.recoveredFromBackup) save(); // best-effort heal so the corruption doesn't linger
+  data.sttDictionary = sanitizeSttTerms(data.sttDictionary);
+  migrateSettingsModels(data);
+  if ((loaded && loaded.recoveredFromBackup) || data._migrated) save(); // best-effort heal so corruption or retired model picks don't linger
   return data;
 }
 
@@ -258,6 +265,9 @@ function stripRendererPatch(patch) {
       .map((p) => (typeof p === 'string' ? p.trim() : ''))
       .filter(Boolean);
   }
+  if (out.sttDictionary !== undefined) {
+    out.sttDictionary = sanitizeSttTerms(out.sttDictionary);
+  }
   if (out.followupResolver !== undefined) out.followupResolver = Boolean(out.followupResolver);
   if (out.claimValidator !== undefined) out.claimValidator = Boolean(out.claimValidator);
   if (out.latencyTracer !== undefined) out.latencyTracer = Boolean(out.latencyTracer);
@@ -291,6 +301,8 @@ function redactForRenderer(s) {
 module.exports = {
   DEFAULTS,
   MAX_AI_RULES_CHARS,
+  MAX_STT_DICTIONARY_TERMS,
+  sanitizeSttTerms,
   MIN_OPACITY,
   MAX_OPACITY,
   clampOpacity,
@@ -301,6 +313,8 @@ module.exports = {
   getSettings() {
     const s = load();
     s.rotationProviders = sanitizeRotationProviders(s.rotationProviders, s.provider);
+    s.sttDictionary = sanitizeSttTerms(s.sttDictionary);
+    migrateSettingsModels(s);
     return s;
   },
   /** Null when the last save succeeded; the Error otherwise. */
@@ -320,6 +334,8 @@ module.exports = {
     nextSettings.baseUrl = normalizeBaseUrl(nextSettings.baseUrl);
     nextSettings.opacity = clampOpacity(nextSettings.opacity);
     nextSettings.rotationProviders = sanitizeRotationProviders(nextSettings.rotationProviders, nextSettings.provider);
+    nextSettings.sttDictionary = sanitizeSttTerms(nextSettings.sttDictionary);
+    migrateSettingsModels(nextSettings);
     if (typeof nextSettings.followupResolver !== 'boolean') nextSettings.followupResolver = DEFAULTS.followupResolver;
     if (typeof nextSettings.claimValidator !== 'boolean') nextSettings.claimValidator = DEFAULTS.claimValidator;
     if (typeof nextSettings.latencyTracer !== 'boolean') nextSettings.latencyTracer = DEFAULTS.latencyTracer;
