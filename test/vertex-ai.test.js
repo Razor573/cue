@@ -1,7 +1,12 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const crypto = require('node:crypto');
-const { streamVertexGenerateContent, clearVertexTokenCache } = require('../src/vertex-ai');
+const {
+  streamVertexGenerateContent,
+  clearVertexTokenCache,
+  listVertexModels,
+  VERTEX_MODEL_OPTIONS
+} = require('../src/vertex-ai');
 
 // Fake service account: a real generated RSA key so createSignedJwt signs for
 // real; the mock fetch below answers the token exchange with a fake token.
@@ -191,4 +196,42 @@ test('user cancel aborts a stalled hedge promptly', async () => {
     (err) => err && err.name === 'AbortError'
   );
   assert.ok(Date.now() - started < 5000, `cancel took ${Date.now() - started}ms, expected < 5000ms`);
+});
+
+
+function listFetch(publisherModels) {
+  return async (url) => {
+    const u = String(url);
+    if (u.includes('oauth2.googleapis.com/token')) {
+      return { ok: true, status: 200, json: async () => ({ access_token: 'fake-token', expires_in: 3600 }) };
+    }
+    if (u.includes('/publishers/google/models')) {
+      return { ok: true, status: 200, json: async () => ({ publisherModels }) };
+    }
+    throw new Error(`unexpected url ${u}`);
+  };
+}
+
+test('VERTEX_MODEL_OPTIONS contains gemini-4-carbon as smart', () => {
+  const carbon = VERTEX_MODEL_OPTIONS.find((m) => m.id === 'gemini-4-carbon');
+  assert.ok(carbon);
+  assert.equal(carbon.tier, 'smart');
+});
+
+test('listVertexModels returns a live-discovered Carbon as smart', async () => {
+  clearVertexTokenCache();
+  const { models } = await listVertexModels(baseConfig(), listFetch([
+    { name: 'publishers/google/models/gemini-4-carbon' },
+    { name: 'publishers/google/models/gemini-4-carbon-preview' }
+  ]));
+  assert.equal(models.find((m) => m.id === 'gemini-4-carbon').tier, 'smart');
+  assert.equal(models.find((m) => m.id === 'gemini-4-carbon-preview').tier, 'smart');
+});
+
+test('listVertexModels still yields Carbon from the curated seed when the API omits it', async () => {
+  clearVertexTokenCache();
+  const { models } = await listVertexModels(baseConfig(), listFetch([
+    { name: 'publishers/google/models/gemini-3.8-flash' }
+  ]));
+  assert.equal(models.find((m) => m.id === 'gemini-4-carbon').tier, 'smart');
 });

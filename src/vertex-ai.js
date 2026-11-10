@@ -6,6 +6,7 @@ const os = require('node:os');
 const VERTEX_MODEL_OPTIONS = [
   { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Fast default)', tier: 'fast' },
   { id: 'gemini-4-argon', label: 'Gemini 4 Argon (Smart default)', tier: 'smart' },
+  { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon', tier: 'smart' },
   { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash', tier: 'fast' },
   { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash', tier: 'fast' },
   { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', tier: 'fast' },
@@ -335,7 +336,7 @@ async function listVertexModels(config = {}, fetchImpl = fetch) {
     const id = cleanVertexModelId(rawName);
     if (!id || !isSupportedVertexGeminiModel(id)) continue;
     if (!byId.has(id)) {
-      const isSmart = /pro|argon|ultra/i.test(id);
+      const isSmart = /pro|argon|ultra|carbon/i.test(id);
       byId.set(id, {
         id,
         label: item.displayName ? `${item.displayName} (${id})` : id,
