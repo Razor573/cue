@@ -17,6 +17,7 @@ const {
   ANTIGRAVITY_CLIENT_SECRET,
   ANTIGRAVITY_DEFAULT_PROJECT_ID,
   ANTIGRAVITY_SESSION_EXPIRED_MESSAGE,
+  ANTIGRAVITY_MODEL_OPTIONS,
   AntigravityError,
   generateAntigravityPkce,
   buildAntigravityAuthorizationUrl,
@@ -28,6 +29,8 @@ const {
   refreshAntigravityTokens,
   ensureAntigravitySession,
   getAntigravityStatus,
+  listAntigravityModels,
+  buildAntigravityThinkingConfig,
   streamAntigravity
 } = require('../src/antigravity');
 
@@ -238,6 +241,8 @@ test('3. Antigravity project discovery vs transient error (setup vs setup_no_pro
 });
 
 test('4. Antigravity wire model mapping (resolveAntigravityWireModel)', () => {
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen'), 'gemini-4-hydrogen');
+  assert.equal(resolveAntigravityWireModel('models/gemini-4-hydrogen'), 'gemini-4-hydrogen');
   assert.equal(resolveAntigravityWireModel('gemini-3.8-flash'), 'gemini-3.8-flash-tiered');
   assert.equal(resolveAntigravityWireModel('models/gemini-3.8-flash'), 'gemini-3.8-flash-tiered');
   assert.equal(resolveAntigravityWireModel('gemini-3.7-flash'), 'gemini-3.7-flash-tiered');
@@ -874,4 +879,78 @@ test('13. Antigravity native web search experiment: toggle plumbing, payload byt
 
   const antigravitySrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'antigravity.js'), 'utf8');
   assert.match(antigravitySrc, /verdict:\s*supported\s*\(grounding observed\)/i);
+});
+
+test('14. Antigravity gemini-4-hydrogen catalog, thinkingLevel config, and listAntigravityModels merge', async () => {
+  assert.deepEqual(ANTIGRAVITY_MODEL_OPTIONS[0], {
+    id: 'gemini-4-hydrogen',
+    label: 'gemini-4-hydrogen (Fast)'
+  });
+
+  const optionIds = ANTIGRAVITY_MODEL_OPTIONS.map((m) => m.id);
+  for (const expectedId of [
+    'gemini-4-hydrogen',
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.1-pro-high',
+    'gemini-3.1-pro-preview'
+  ]) {
+    assert.ok(optionIds.includes(expectedId));
+  }
+
+  for (const excludedId of ['claude-opus-5.5', 'claude-sonnet-5.5', 'gpt-oss-120b', 'gemini-4-carbon']) {
+    assert.equal(optionIds.includes(excludedId), false);
+  }
+  for (const opt of ANTIGRAVITY_MODEL_OPTIONS) {
+    assert.doesNotMatch(
+      `${opt.id} ${opt.label}`,
+      /claude[- ]opus[- ]5\.5|claude[- ]sonnet[- ]5\.5|gpt[- ]oss[- ]120b|gemini[- ]4[- ]carbon/i
+    );
+  }
+
+  for (const level of ['LOW', 'MEDIUM', 'HIGH']) {
+    const cfg = buildAntigravityThinkingConfig('gemini-4-hydrogen', level);
+    assert.deepEqual(cfg, { includeThoughts: true, thinkingLevel: level });
+    assert.equal(cfg.thinkingBudget, undefined);
+  }
+
+  const env = makeTempStorage(true);
+  try {
+    setProviderTokens(
+      'antigravity',
+      {
+        accessToken: 'valid-ag-token',
+        refreshToken: 'valid-ag-refresh',
+        expiresAt: Date.now() + 3600_000,
+        projectId: 'ag-proj-test'
+      },
+      env.storageOptions
+    );
+
+    const mockFetch = async (url, init) => {
+      assert.ok(String(url).includes('fetchAvailableModels'));
+      assert.deepEqual(JSON.parse(init.body), { project: 'ag-proj-test' });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          models: {
+            'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash' },
+            'gemini-4-hydrogen-preview': { displayName: 'Gemini 4 Hydrogen Preview' },
+            'claude-opus-5.5': { displayName: 'Claude Opus 5.5' }
+          }
+        })
+      };
+    };
+
+    const models = await listAntigravityModels({ oauthStorageOptions: env.storageOptions }, mockFetch);
+    assert.equal(models[0], 'gemini-4-hydrogen');
+    assert.ok(models.includes('gemini-4-hydrogen'));
+    assert.ok(models.includes('gemini-3.8-flash-tiered'));
+    assert.ok(models.includes('gemini-4-hydrogen-preview'));
+    assert.equal(models.includes('claude-opus-5.5'), false);
+  } finally {
+    env.cleanup();
+  }
 });

@@ -616,6 +616,9 @@ test('geminiGenerationConfig: smart tier keeps the model default reasoning with 
 // ============================================================================
 
 const {
+  DEFAULT_MODELS,
+  PROVIDER_MODEL_CATALOG,
+  filterGeminiApiModels,
   GeminiPromptCache,
   GEMINI_CACHE_MIN_PROMPT_CHARS,
   getClaudeCacheMinChars,
@@ -631,6 +634,7 @@ const {
   migrateSettingsModels,
   RETIRED_MODEL_MIGRATIONS
 } = require('../src/llm');
+const { DEFAULTS: STORE_DEFAULTS } = require('../src/store');
 
 test('Step 9.1: GeminiPromptCache skips prompts below 4500 chars and creates/caches above threshold', async () => {
   const cache = new GeminiPromptCache();
@@ -982,4 +986,91 @@ test('Step 10.3: listProviderModels caches live catalogue for 24h and invalidate
   const res4 = await listProviderModels('gemini', { apiKeys: { gemini: 'key-2' } }, { fetchImpl: fakeFetch, forceRefresh: true });
   assert.equal(res4.live, true);
   assert.equal(fetchCount, 3);
+});
+
+test('Gemini 4 Hydrogen fast defaults and catalog entries preserve smart defaults and 3.8-flash fallbacks', () => {
+  assert.deepEqual(DEFAULT_MODELS.gemini, { fast: 'gemini-4-hydrogen', smart: 'gemini-3.1-pro-preview' });
+  assert.deepEqual(DEFAULT_MODELS.vertex, { fast: 'gemini-4-hydrogen', smart: 'gemini-4-argon' });
+  assert.deepEqual(DEFAULT_MODELS.antigravity, { fast: 'gemini-4-hydrogen', smart: 'gemini-3.1-pro-high' });
+
+  assert.deepEqual(STORE_DEFAULTS.models.gemini, { fast: 'gemini-4-hydrogen', smart: 'gemini-3.1-pro-preview' });
+  assert.deepEqual(STORE_DEFAULTS.models.vertex, { fast: 'gemini-4-hydrogen', smart: 'gemini-4-argon' });
+  assert.deepEqual(STORE_DEFAULTS.models.antigravity, { fast: 'gemini-4-hydrogen', smart: 'gemini-3.1-pro-high' });
+
+  assert.deepEqual(PROVIDER_MODEL_CATALOG.gemini.fast[0], {
+    id: 'gemini-4-hydrogen',
+    label: 'Gemini 4 Hydrogen (Default)',
+    tier: 'fast'
+  });
+  assert.deepEqual(
+    PROVIDER_MODEL_CATALOG.gemini.fast.find((m) => m.id === 'gemini-3.8-flash'),
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', tier: 'fast' }
+  );
+  assert.equal(PROVIDER_MODEL_CATALOG.gemini.smart[0].id, 'gemini-3.1-pro-preview');
+  assert.ok(PROVIDER_MODEL_CATALOG.gemini.smart.some((m) => m.id === 'gemini-3.8-flash'));
+
+  assert.deepEqual(PROVIDER_MODEL_CATALOG.antigravity.fast[0], {
+    id: 'gemini-4-hydrogen',
+    label: 'Gemini 4 Hydrogen (Default)',
+    tier: 'fast'
+  });
+  assert.deepEqual(
+    PROVIDER_MODEL_CATALOG.antigravity.fast.find((m) => m.id === 'gemini-3.8-flash'),
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', tier: 'fast' }
+  );
+  assert.equal(PROVIDER_MODEL_CATALOG.antigravity.smart[0].id, 'gemini-3.1-pro-high');
+  assert.ok(PROVIDER_MODEL_CATALOG.antigravity.smart.some((m) => m.id === 'gemini-3.8-flash'));
+  for (const excludedId of ['claude-opus-5.5', 'claude-sonnet-5.5', 'gpt-oss-120b', 'gemini-4-carbon']) {
+    assert.equal(PROVIDER_MODEL_CATALOG.antigravity.all.some((m) => m.id === excludedId), false);
+  }
+
+  assert.ok(PROVIDER_MODEL_CATALOG.vertex.fast.some((m) => m.id === 'gemini-3.8-flash'));
+  assert.ok(PROVIDER_MODEL_CATALOG.vertex.smart.some((m) => m.id === 'gemini-4-argon'));
+});
+
+test('filterGeminiApiModels passes gemini-4-hydrogen with tier fast', () => {
+  const models = filterGeminiApiModels([
+    { name: 'models/gemini-4-hydrogen', displayName: 'Gemini 4 Hydrogen', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', supportedGenerationMethods: ['generateContent'] }
+  ]);
+  assert.deepEqual(models, [
+    { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen', tier: 'fast' },
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', tier: 'fast' }
+  ]);
+});
+
+test('saved gemini-3.8-flash picks are not silently migrated by createLLM or migrateSettingsModels', () => {
+  const geminiLlm = createLLM(geminiSettings({
+    models: { gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-preview' } }
+  }));
+  assert.equal(geminiLlm.model, 'gemini-3.8-flash');
+
+  const vertexLlm = createLLM({
+    provider: 'vertex',
+    smart: false,
+    vertexProject: 'test-project',
+    apiKeys: { vertex: '{}' },
+    models: { vertex: { fast: 'gemini-3.8-flash', smart: 'gemini-4-argon' } }
+  });
+  assert.equal(vertexLlm.model, 'gemini-3.8-flash');
+
+  const antigravityLlm = createLLM({
+    provider: 'antigravity',
+    smart: false,
+    models: { antigravity: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-high' } }
+  });
+  assert.equal(antigravityLlm.model, 'gemini-3.8-flash');
+
+  const settings = {
+    models: {
+      gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-preview' },
+      vertex: { fast: 'gemini-3.8-flash', smart: 'gemini-4-argon' },
+      antigravity: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-high' }
+    }
+  };
+  const migrated = migrateSettingsModels(settings);
+  assert.equal(migrated.changed, false);
+  assert.equal(settings.models.gemini.fast, 'gemini-3.8-flash');
+  assert.equal(settings.models.vertex.fast, 'gemini-3.8-flash');
+  assert.equal(settings.models.antigravity.fast, 'gemini-3.8-flash');
 });

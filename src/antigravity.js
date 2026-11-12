@@ -66,6 +66,7 @@ const ANTIGRAVITY_HEADERS = {
 };
 
 const ANTIGRAVITY_MODEL_OPTIONS = [
+  { id: 'gemini-4-hydrogen', label: 'gemini-4-hydrogen (Fast)' },
   { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Fast)' },
   { id: 'gemini-3.7-flash', label: 'gemini-3.7-flash (Fast)' },
   { id: 'gemini-3.6-flash', label: 'gemini-3.6-flash (Fast)' },
@@ -696,7 +697,7 @@ function buildAntigravityContents(turns = [], imageDataUrl = null) {
 
 function buildAntigravityThinkingConfig(wireModel, thinkingLevel) {
   const level = String(thinkingLevel || 'LOW').toUpperCase().trim();
-  if (/gemini-3\.|gemini-pro-agent/i.test(wireModel)) {
+  if (/gemini-3\.|gemini-4(?:[.-]|$)|gemini-pro-agent/i.test(wireModel)) {
     let resolved = ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH'].includes(level) ? level : 'LOW';
     if (resolved === 'MINIMAL' && /3\.[78]/i.test(wireModel)) {
       resolved = 'LOW';
@@ -915,6 +916,7 @@ module.exports = {
   signOutAntigravity,
   getAntigravityStatus,
   listAntigravityModels,
+  buildAntigravityThinkingConfig,
   buildAntigravityPayload,
   streamAntigravity
 };

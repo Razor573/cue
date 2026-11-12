@@ -99,9 +99,9 @@ const DEFAULT_MODELS = {
   cerebras: 'qwen-3.8-27b',
   openai: 'gpt-4o-mini',
   anthropic: CURRENT_ANTHROPIC_DEFAULT_FAST,
-  gemini: CURRENT_GEMINI_DEFAULT,
-  vertex: { fast: 'gemini-3.8-flash', smart: 'gemini-4-argon' },
-  antigravity: { fast: 'gemini-3.8-flash', smart: 'gemini-3.1-pro-high' },
+  gemini: { fast: 'gemini-4-hydrogen', smart: 'gemini-3.1-pro-preview' },
+  vertex: { fast: 'gemini-4-hydrogen', smart: 'gemini-4-argon' },
+  antigravity: { fast: 'gemini-4-hydrogen', smart: 'gemini-3.1-pro-high' },
   codex: { fast: 'gpt-5.5', smart: 'gpt-5.5-codex' },
   ollama: 'llama3.2',
   groq: 'llama-3.1-8b-instant',
@@ -157,7 +157,8 @@ const PROVIDER_MODEL_CATALOG = {
   ),
   antigravity: buildCatalogEntry(
     [
-      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Default)' },
+      { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen (Default)' },
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
       { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' },
       { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' }
     ],
@@ -188,7 +189,8 @@ const PROVIDER_MODEL_CATALOG = {
   ),
   gemini: buildCatalogEntry(
     [
-      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Default)' },
+      { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen (Default)' },
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
       { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' },
       { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' },
       { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },

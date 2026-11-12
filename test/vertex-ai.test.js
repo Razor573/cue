@@ -235,3 +235,38 @@ test('listVertexModels still yields Carbon from the curated seed when the API om
   ]));
   assert.equal(models.find((m) => m.id === 'gemini-4-carbon').tier, 'smart');
 });
+
+test('VERTEX_MODEL_OPTIONS leads with gemini-4-hydrogen as fast default and keeps Argon as smart default', () => {
+  assert.equal(VERTEX_MODEL_OPTIONS[0].id, 'gemini-4-hydrogen');
+  assert.equal(VERTEX_MODEL_OPTIONS[0].label, 'Gemini 4 Hydrogen (Fast default)');
+  assert.equal(VERTEX_MODEL_OPTIONS[0].tier, 'fast');
+
+  const argon = VERTEX_MODEL_OPTIONS.find((m) => m.id === 'gemini-4-argon');
+  assert.ok(argon);
+  assert.equal(argon.label, 'Gemini 4 Argon (Smart default)');
+  assert.equal(argon.tier, 'smart');
+
+  const flash38 = VERTEX_MODEL_OPTIONS.find((m) => m.id === 'gemini-3.8-flash');
+  assert.ok(flash38);
+  assert.equal(flash38.label, 'Gemini 3.8 Flash');
+  assert.equal(flash38.tier, 'fast');
+  assert.ok(!flash38.label.includes('(Fast default)'));
+});
+
+test('listVertexModels returns live-discovered Hydrogen models as fast', async () => {
+  clearVertexTokenCache();
+  const { models } = await listVertexModels(baseConfig(), listFetch([
+    { name: 'publishers/google/models/gemini-4-hydrogen' },
+    { name: 'publishers/google/models/gemini-4-hydrogen-preview' }
+  ]));
+  assert.equal(models.find((m) => m.id === 'gemini-4-hydrogen').tier, 'fast');
+  assert.equal(models.find((m) => m.id === 'gemini-4-hydrogen-preview').tier, 'fast');
+});
+
+test('listVertexModels still yields Hydrogen from the curated seed when the API omits it', async () => {
+  clearVertexTokenCache();
+  const { models } = await listVertexModels(baseConfig(), listFetch([
+    { name: 'publishers/google/models/gemini-3.8-flash' }
+  ]));
+  assert.equal(models.find((m) => m.id === 'gemini-4-hydrogen').tier, 'fast');
+});
