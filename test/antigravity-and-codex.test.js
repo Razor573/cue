@@ -19,8 +19,10 @@ const {
   ANTIGRAVITY_SESSION_EXPIRED_MESSAGE,
   ANTIGRAVITY_MODEL_OPTIONS,
   AntigravityError,
+  buildAntigravityUserAgent,
   generateAntigravityPkce,
   buildAntigravityAuthorizationUrl,
+  collapseAntigravityModelId,
   resolveAntigravityWireModel,
   startAntigravityCallbackServer,
   discoverAntigravityProject,
@@ -241,10 +243,26 @@ test('3. Antigravity project discovery vs transient error (setup vs setup_no_pro
 });
 
 test('4. Antigravity wire model mapping (resolveAntigravityWireModel)', () => {
-  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen'), 'gemini-4-hydrogen');
-  assert.equal(resolveAntigravityWireModel('models/gemini-4-hydrogen'), 'gemini-4-hydrogen');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen'), 'gemini-4-hydrogen-medium');
+  assert.equal(resolveAntigravityWireModel('models/gemini-4-hydrogen'), 'gemini-4-hydrogen-medium');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen', 'LOW'), 'gemini-4-hydrogen-low');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen', 'MEDIUM'), 'gemini-4-hydrogen-medium');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen', 'HIGH'), 'gemini-4-hydrogen-high');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen', 'XHIGH'), 'gemini-4-hydrogen-xhigh');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen', 'MINIMAL'), 'gemini-4-hydrogen-low');
+  assert.equal(resolveAntigravityWireModel('gemini-4-argon'), 'gemini-4-argon-medium');
+  assert.equal(resolveAntigravityWireModel('models/gemini-4-argon', 'HIGH'), 'gemini-4-argon-high');
+  assert.equal(resolveAntigravityWireModel('gemini-4-argon', 'LOW'), 'gemini-4-argon-low');
+  assert.equal(resolveAntigravityWireModel('gemini-4-argon', 'MEDIUM'), 'gemini-4-argon-medium');
+  assert.equal(resolveAntigravityWireModel('gemini-4-argon', 'MINIMAL'), 'gemini-4-argon-low');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen-high', 'LOW'), 'gemini-4-hydrogen-high');
+  assert.equal(resolveAntigravityWireModel('gemini-4-argon-low', 'HIGH'), 'gemini-4-argon-low');
+  assert.equal(resolveAntigravityWireModel('gemini-4-hydrogen-xhigh', 'MEDIUM'), 'gemini-4-hydrogen-xhigh');
+  assert.equal(resolveAntigravityWireModel('gemini-3.8-flash-high', 'LOW'), 'gemini-3.8-flash-high');
+  assert.equal(resolveAntigravityWireModel('gemini-3.8-flash-tiered', 'LOW'), 'gemini-3.8-flash-tiered');
+  assert.equal(resolveAntigravityWireModel('gemini-pro-agent', 'LOW'), 'gemini-pro-agent');
   assert.equal(resolveAntigravityWireModel('gemini-3.8-flash'), 'gemini-3.8-flash-tiered');
-  assert.equal(resolveAntigravityWireModel('models/gemini-3.8-flash'), 'gemini-3.8-flash-tiered');
+  assert.equal(resolveAntigravityWireModel('models/gemini-3.8-flash', 'HIGH'), 'gemini-3.8-flash-tiered');
   assert.equal(resolveAntigravityWireModel('gemini-3.7-flash'), 'gemini-3.7-flash-tiered');
   assert.equal(resolveAntigravityWireModel('gemini-3.6-flash'), 'gemini-3.6-flash-tiered');
   assert.equal(resolveAntigravityWireModel('gemini-3.1-pro-high'), 'gemini-pro-agent');
@@ -881,33 +899,19 @@ test('13. Antigravity native web search experiment: toggle plumbing, payload byt
   assert.match(antigravitySrc, /verdict:\s*supported\s*\(grounding observed\)/i);
 });
 
-test('14. Antigravity gemini-4-hydrogen catalog, thinkingLevel config, and listAntigravityModels merge', async () => {
-  assert.deepEqual(ANTIGRAVITY_MODEL_OPTIONS[0], {
-    id: 'gemini-4-hydrogen',
-    label: 'gemini-4-hydrogen (Fast)'
-  });
+test('14. Antigravity UA, bare family catalog, collapseAntigravityModelId, thinking config, and live model merge', async () => {
+  assert.equal(buildAntigravityUserAgent('win32', 'x64'), 'antigravity/hub/2.31.2 windows/amd64');
 
-  const optionIds = ANTIGRAVITY_MODEL_OPTIONS.map((m) => m.id);
-  for (const expectedId of [
-    'gemini-4-hydrogen',
-    'gemini-3.8-flash',
-    'gemini-3.7-flash',
-    'gemini-3.6-flash',
-    'gemini-3.1-pro-high',
-    'gemini-3.1-pro-preview'
-  ]) {
-    assert.ok(optionIds.includes(expectedId));
-  }
+  assert.deepEqual(ANTIGRAVITY_MODEL_OPTIONS, [
+    { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
+    { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' }
+  ]);
 
-  for (const excludedId of ['claude-opus-5.5', 'claude-sonnet-5.5', 'gpt-oss-120b', 'gemini-4-carbon']) {
-    assert.equal(optionIds.includes(excludedId), false);
-  }
-  for (const opt of ANTIGRAVITY_MODEL_OPTIONS) {
-    assert.doesNotMatch(
-      `${opt.id} ${opt.label}`,
-      /claude[- ]opus[- ]5\.5|claude[- ]sonnet[- ]5\.5|gpt[- ]oss[- ]120b|gemini[- ]4[- ]carbon/i
-    );
-  }
+  assert.equal(collapseAntigravityModelId('  models/gemini-4-hydrogen-xhigh  '), 'gemini-4-hydrogen');
+  assert.equal(collapseAntigravityModelId('gemini-4-argon-medium'), 'gemini-4-argon');
+  assert.equal(collapseAntigravityModelId('gemini-3.8-flash-high'), 'gemini-3.8-flash');
+  assert.equal(collapseAntigravityModelId('gemini-3.1-pro-high'), 'gemini-3.1-pro-high');
 
   for (const level of ['LOW', 'MEDIUM', 'HIGH']) {
     const cfg = buildAntigravityThinkingConfig('gemini-4-hydrogen', level);
@@ -936,20 +940,90 @@ test('14. Antigravity gemini-4-hydrogen catalog, thinkingLevel config, and listA
         status: 200,
         json: async () => ({
           models: {
-            'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash' },
-            'gemini-4-hydrogen-preview': { displayName: 'Gemini 4 Hydrogen Preview' },
-            'claude-opus-5.5': { displayName: 'Claude Opus 5.5' }
+            'gemini-4-argon-medium': { displayName: 'Gemini 4 Argon (medium)' },
+            'gemini-4-argon-high': { displayName: 'Gemini 4 Argon (high)' },
+            'gemini-4-argon-low': { displayName: 'Gemini 4 Argon (low)' },
+            'gemini-4-hydrogen-high': { displayName: 'Gemini 4 Hydrogen (high)' },
+            'gemini-4-hydrogen-xhigh': { displayName: 'Gemini 4 Hydrogen (xhigh)' },
+            'gemini-4-hydrogen-medium': { displayName: 'Gemini 4 Hydrogen (medium)' },
+            'gemini-4-hydrogen-low': { displayName: 'Gemini 4 Hydrogen (low)' },
+            'gemini-3.8-flash-high': { displayName: 'Gemini 3.8 Flash (high)' },
+            'gemini-3.8-flash-medium': { displayName: 'Gemini 3.8 Flash (medium)' },
+            'gemini-3.8-flash-low': { displayName: 'Gemini 3.8 Flash (low)' }
           }
         })
       };
     };
 
     const models = await listAntigravityModels({ oauthStorageOptions: env.storageOptions }, mockFetch);
-    assert.equal(models[0], 'gemini-4-hydrogen');
-    assert.ok(models.includes('gemini-4-hydrogen'));
-    assert.ok(models.includes('gemini-3.8-flash-tiered'));
-    assert.ok(models.includes('gemini-4-hydrogen-preview'));
-    assert.equal(models.includes('claude-opus-5.5'), false);
+    assert.deepEqual(models, ['gemini-4-hydrogen', 'gemini-4-argon', 'gemini-3.8-flash']);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('15. Antigravity streamAntigravity routes Gemini 4 wire model by thinkingLevel across turns and keeps hub UA', async () => {
+  const env = makeTempStorage(true);
+  try {
+    setProviderTokens(
+      'antigravity',
+      {
+        accessToken: 'valid-ag-token',
+        refreshToken: 'valid-ag-refresh',
+        expiresAt: Date.now() + 3600_000,
+        projectId: 'ag-proj-stream'
+      },
+      env.storageOptions
+    );
+
+    const observedRequests = [];
+    const mockFetch = async (url, init) => {
+      assert.ok(String(url).includes('streamGenerateContent'));
+      observedRequests.push({
+        headers: init.headers,
+        body: JSON.parse(init.body)
+      });
+      return {
+        ok: true,
+        status: 200,
+        body: makeSseStream([
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [{ content: { parts: [{ text: 'ok' }] } }]
+            }
+          })}\n\n`
+        ])
+      };
+    };
+
+    await streamAntigravity(
+      { thinkingLevel: 'MEDIUM', oauthStorageOptions: env.storageOptions },
+      { model: 'gemini-4-hydrogen', turns: [{ role: 'user', text: 'Turn 1' }] },
+      mockFetch
+    );
+
+    await streamAntigravity(
+      { thinkingLevel: 'HIGH', oauthStorageOptions: env.storageOptions },
+      { model: 'gemini-4-hydrogen', turns: [{ role: 'user', text: 'Turn 2' }] },
+      mockFetch
+    );
+
+    await streamAntigravity(
+      { thinkingLevel: 'HIGH', oauthStorageOptions: env.storageOptions },
+      { model: 'gemini-3.8-flash', turns: [{ role: 'user', text: 'Turn 3' }] },
+      mockFetch
+    );
+
+    assert.equal(observedRequests.length, 3);
+    assert.equal(observedRequests[0].body.model, 'gemini-4-hydrogen-medium');
+    assert.equal(observedRequests[0].body.userAgent, 'antigravity');
+    assert.match(observedRequests[0].headers['User-Agent'], /^antigravity\/hub\/2\.31\.2 /);
+
+    assert.equal(observedRequests[1].body.model, 'gemini-4-hydrogen-high');
+    assert.equal(observedRequests[1].body.userAgent, 'antigravity');
+    assert.match(observedRequests[1].headers['User-Agent'], /^antigravity\/hub\/2\.31\.2 /);
+
+    assert.equal(observedRequests[2].body.model, 'gemini-3.8-flash-tiered');
   } finally {
     env.cleanup();
   }

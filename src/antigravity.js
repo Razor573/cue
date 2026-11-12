@@ -45,12 +45,12 @@ const ANTIGRAVITY_DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
 const ANTIGRAVITY_REFRESH_LEAD_MS = 60_000;
 const ANTIGRAVITY_SESSION_EXPIRED_MESSAGE = 'Antigravity session expired. Please sign in again in Settings.';
 
-const ANTIGRAVITY_CLIENT_VERSION = '2.5.5';
+const ANTIGRAVITY_CLIENT_VERSION = '2.31.2';
 
 function buildAntigravityUserAgent(platform = process.platform, arch = process.arch) {
   const os = platform === 'win32' ? 'windows' : platform;
   const cpu = arch === 'x64' ? 'amd64' : arch === 'ia32' ? '386' : arch;
-  return `antigravity/${ANTIGRAVITY_CLIENT_VERSION} ${os}/${cpu}`;
+  return `antigravity/hub/${ANTIGRAVITY_CLIENT_VERSION} ${os}/${cpu}`;
 }
 
 const ANTIGRAVITY_USER_AGENT = buildAntigravityUserAgent();
@@ -66,12 +66,9 @@ const ANTIGRAVITY_HEADERS = {
 };
 
 const ANTIGRAVITY_MODEL_OPTIONS = [
-  { id: 'gemini-4-hydrogen', label: 'gemini-4-hydrogen (Fast)' },
-  { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Fast)' },
-  { id: 'gemini-3.7-flash', label: 'gemini-3.7-flash (Fast)' },
-  { id: 'gemini-3.6-flash', label: 'gemini-3.6-flash (Fast)' },
-  { id: 'gemini-3.1-pro-high', label: 'gemini-3.1-pro-high (Smart)' },
-  { id: 'gemini-3.1-pro-preview', label: 'gemini-3.1-pro-preview (Smart)' }
+  { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
+  { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
+  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' }
 ];
 
 class AntigravityError extends Error {
@@ -124,11 +121,14 @@ function decodeJwtPayloadUnsafe(jwt) {
   }
 }
 
-function resolveAntigravityWireModel(model) {
+function collapseAntigravityModelId(modelId) {
+  const id = String(modelId || '').trim().replace(/^models\//i, '');
+  if (!id) return '';
+  return id.replace(/^(gemini-(?:4-.+|3\.8-flash))-(?:low|medium|high|xhigh)$/i, '$1');
+}
+
+function resolveAntigravityWireModel(model, thinkingLevel) {
   const id = String(model || '').trim().replace(/^models\//i, '') || 'gemini-3.8-flash';
-  if (/^gemini-3\.8-flash/i.test(id)) return 'gemini-3.8-flash-tiered';
-  if (/^gemini-3\.7-flash/i.test(id)) return 'gemini-3.7-flash-tiered';
-  if (/^gemini-3\.6-flash/i.test(id)) return 'gemini-3.6-flash-tiered';
   if (
     id === 'gemini-3.1-pro' ||
     id === 'gemini-3.1-pro-high' ||
@@ -136,6 +136,23 @@ function resolveAntigravityWireModel(model) {
     /^gemini-pro/i.test(id)
   ) {
     return 'gemini-pro-agent';
+  }
+  if (/-(?:low|medium|high|xhigh|tiered|agent)$/i.test(id)) {
+    return id;
+  }
+  if (/^gemini-3\.8-flash/i.test(id)) return 'gemini-3.8-flash-tiered';
+  if (/^gemini-3\.7-flash/i.test(id)) return 'gemini-3.7-flash-tiered';
+  if (/^gemini-3\.6-flash/i.test(id)) return 'gemini-3.6-flash-tiered';
+  if (/^gemini-4-(?:argon|hydrogen)$/i.test(id)) {
+    const rawLevel = String(thinkingLevel || '').trim().toLowerCase();
+    const level = !rawLevel
+      ? 'medium'
+      : rawLevel === 'minimal'
+        ? 'low'
+        : ['low', 'medium', 'high', 'xhigh'].includes(rawLevel)
+          ? rawLevel
+          : 'medium';
+    return `${id}-${level}`;
   }
   return id;
 }
@@ -649,7 +666,10 @@ async function listAntigravityModels(options = {}, fetchImpl = fetch) {
       const models = data && data.models;
       if (models && typeof models === 'object' && !Array.isArray(models)) {
         for (const id of Object.keys(models)) {
-          if (/^gemini/i.test(id)) merged.set(id, id);
+          if (/^gemini/i.test(id)) {
+            const collapsed = collapseAntigravityModelId(id);
+            if (collapsed) merged.set(collapsed, collapsed);
+          }
         }
       }
     }
@@ -729,7 +749,7 @@ function buildAntigravityPayload({
   googleSearch = false,
   requestId
 } = {}) {
-  const wireModel = resolveAntigravityWireModel(model);
+  const wireModel = resolveAntigravityWireModel(model, thinkingLevel);
   const contents = buildAntigravityContents(turns, imageDataUrl);
   const generationConfig = {
     maxOutputTokens: maxTokens || 2048,
@@ -762,7 +782,8 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
   const storageOpts = getStorageOpts(config);
   let session = await ensureAntigravitySession({ ...config, oauthStorageOptions: storageOpts, fetchImpl });
 
-  const wireModel = resolveAntigravityWireModel(params.model);
+  const thinkingLevel = params.thinkingLevel || config.thinkingLevel || 'LOW';
+  const wireModel = resolveAntigravityWireModel(params.model, thinkingLevel);
 
   const buildPayload = (projectId) =>
     buildAntigravityPayload({
@@ -772,7 +793,7 @@ async function streamAntigravity(config = {}, params = {}, fetchImpl = fetch) {
       turns: params.turns,
       imageDataUrl: params.imageDataUrl,
       maxTokens: params.maxTokens,
-      thinkingLevel: config.thinkingLevel || 'LOW',
+      thinkingLevel,
       googleSearch: Boolean(config.googleSearch)
     });
 
@@ -903,9 +924,11 @@ module.exports = {
   ANTIGRAVITY_SESSION_EXPIRED_MESSAGE,
   ANTIGRAVITY_MODEL_OPTIONS,
   AntigravityError,
+  buildAntigravityUserAgent,
   generateAntigravityPkce,
   buildAntigravityAuthorizationUrl,
   decodeJwtPayloadUnsafe,
+  collapseAntigravityModelId,
   resolveAntigravityWireModel,
   startAntigravityCallbackServer,
   discoverAntigravityProject,

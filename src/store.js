@@ -14,6 +14,7 @@ const { createFileStore } = require('./settings-store-core');
 const { normalizeBaseUrl } = require('./openai-compatible');
 const { sanitizeSttTerms, MAX_STT_DICTIONARY_TERMS } = require('./stt');
 const { migrateSettingsModels } = require('./llm');
+const { collapseAntigravityModelId } = require('./antigravity');
 
 const fileStore = createFileStore(() => (app ? app.getPath('userData') : require('os').tmpdir()), 'cue-data.json');
 
@@ -203,11 +204,44 @@ function deepMerge(base, over) {
   return out;
 }
 
+function normalizeAntigravitySavedModels(settings) {
+  if (!settings || typeof settings !== 'object') return false;
+  let changed = false;
+  for (const entry of [
+    settings.models && settings.models.antigravity,
+    settings.providerModels && typeof settings.providerModels.antigravity === 'object'
+      ? settings.providerModels.antigravity
+      : null
+  ]) {
+    if (!entry || typeof entry !== 'object') continue;
+    for (const tier of ['fast', 'smart']) {
+      const current = entry[tier];
+      if (typeof current === 'string' && current.trim()) {
+        const next = collapseAntigravityModelId(current);
+        if (next && next !== current) {
+          entry[tier] = next;
+          changed = true;
+        }
+      }
+    }
+  }
+  const legacyString = settings.providerModels && settings.providerModels.antigravity;
+  if (typeof legacyString === 'string' && legacyString.trim()) {
+    const next = collapseAntigravityModelId(legacyString);
+    if (next && next !== legacyString) {
+      settings.providerModels.antigravity = next;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function load() {
   if (data) {
     data.rotationProviders = sanitizeRotationProviders(data.rotationProviders, data.provider);
     data.sttDictionary = sanitizeSttTerms(data.sttDictionary);
     migrateSettingsModels(data);
+    if (normalizeAntigravitySavedModels(data)) data._migrated = true;
     return data;
   }
   const loaded = fileStore.load();
@@ -215,6 +249,7 @@ function load() {
   data.rotationProviders = sanitizeRotationProviders(data.rotationProviders, data.provider);
   data.sttDictionary = sanitizeSttTerms(data.sttDictionary);
   migrateSettingsModels(data);
+  if (normalizeAntigravitySavedModels(data)) data._migrated = true;
   if ((loaded && loaded.recoveredFromBackup) || data._migrated) save(); // best-effort heal so corruption or retired model picks don't linger
   return data;
 }
@@ -315,6 +350,7 @@ module.exports = {
     s.rotationProviders = sanitizeRotationProviders(s.rotationProviders, s.provider);
     s.sttDictionary = sanitizeSttTerms(s.sttDictionary);
     migrateSettingsModels(s);
+    normalizeAntigravitySavedModels(s);
     return s;
   },
   /** Null when the last save succeeded; the Error otherwise. */
@@ -336,6 +372,7 @@ module.exports = {
     nextSettings.rotationProviders = sanitizeRotationProviders(nextSettings.rotationProviders, nextSettings.provider);
     nextSettings.sttDictionary = sanitizeSttTerms(nextSettings.sttDictionary);
     migrateSettingsModels(nextSettings);
+    normalizeAntigravitySavedModels(nextSettings);
     if (typeof nextSettings.followupResolver !== 'boolean') nextSettings.followupResolver = DEFAULTS.followupResolver;
     if (typeof nextSettings.claimValidator !== 'boolean') nextSettings.claimValidator = DEFAULTS.claimValidator;
     if (typeof nextSettings.latencyTracer !== 'boolean') nextSettings.latencyTracer = DEFAULTS.latencyTracer;

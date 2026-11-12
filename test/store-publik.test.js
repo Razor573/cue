@@ -188,3 +188,54 @@ test('a failed save is reported via lastSaveError instead of being silently swal
   assert.ok(store.lastSaveError());
   assert.match(String(store.lastSaveError().message), /ENOENT/);
 });
+
+test('saved suffixed antigravity model ids collapse to bare family ids on load and persist cleanly', () => {
+  const { store, read } = loadStore({
+    provider: 'openai',
+    aiRules: 'keep-me',
+    apiKeys: { openai: 'sk-keep' },
+    models: {
+      openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o' },
+      antigravity: { fast: 'gemini-4-hydrogen-xhigh', smart: 'gemini-4-argon-medium' }
+    }
+  });
+
+  const loaded = store.getSettings();
+  assert.deepEqual(loaded.models.antigravity, { fast: 'gemini-4-hydrogen', smart: 'gemini-4-argon' });
+
+  const persisted = read();
+  assert.deepEqual(persisted.models.antigravity, { fast: 'gemini-4-hydrogen', smart: 'gemini-4-argon' });
+  assert.equal(persisted.provider, 'openai');
+  assert.equal(persisted.aiRules, 'keep-me');
+  assert.equal(persisted.apiKeys.openai, 'sk-keep');
+  assert.deepEqual(persisted.models.openai, { fast: 'gpt-4o-mini', smart: 'gpt-4o' });
+  assert.equal(persisted._migrated, undefined);
+
+  const flash38 = loadStore({
+    models: {
+      antigravity: { fast: 'gemini-3.8-flash-high', smart: 'gemini-3.1-pro-high' }
+    }
+  });
+  assert.deepEqual(flash38.store.getSettings().models.antigravity, {
+    fast: 'gemini-3.8-flash',
+    smart: 'gemini-3.1-pro-high'
+  });
+  assert.deepEqual(flash38.read().models.antigravity, {
+    fast: 'gemini-3.8-flash',
+    smart: 'gemini-3.1-pro-high'
+  });
+
+  flash38.store.setSettings({
+    models: {
+      antigravity: { fast: 'gemini-4-hydrogen-low', smart: 'gemini-4-argon-high' }
+    }
+  });
+  assert.deepEqual(flash38.store.getSettings().models.antigravity, {
+    fast: 'gemini-4-hydrogen',
+    smart: 'gemini-4-argon'
+  });
+  assert.deepEqual(flash38.read().models.antigravity, {
+    fast: 'gemini-4-hydrogen',
+    smart: 'gemini-4-argon'
+  });
+});

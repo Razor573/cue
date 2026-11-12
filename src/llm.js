@@ -157,16 +157,13 @@ const PROVIDER_MODEL_CATALOG = {
   ),
   antigravity: buildCatalogEntry(
     [
-      { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen (Default)' },
-      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
-      { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' },
-      { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' }
+      { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' }
     ],
     [
-      { id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro High (Default)' },
-      { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
-      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
-      { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' }
+      { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
+      { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' }
     ]
   ),
   codex: buildCatalogEntry(
@@ -1936,7 +1933,7 @@ async function listProviderModels(arg1 = {}, arg2 = {}, arg3 = undefined) {
         return {
           id: cleanId,
           label: (id && typeof id === 'object' && id.label) || cleanId,
-          tier: /pro/i.test(cleanId) ? 'smart' : 'fast'
+          tier: /pro|argon/i.test(cleanId) ? 'smart' : 'fast'
         };
       });
       live = true;

@@ -1009,18 +1009,29 @@ test('Gemini 4 Hydrogen fast defaults and catalog entries preserve smart default
   assert.equal(PROVIDER_MODEL_CATALOG.gemini.smart[0].id, 'gemini-3.1-pro-preview');
   assert.ok(PROVIDER_MODEL_CATALOG.gemini.smart.some((m) => m.id === 'gemini-3.8-flash'));
 
-  assert.deepEqual(PROVIDER_MODEL_CATALOG.antigravity.fast[0], {
-    id: 'gemini-4-hydrogen',
-    label: 'Gemini 4 Hydrogen (Default)',
-    tier: 'fast'
-  });
-  assert.deepEqual(
-    PROVIDER_MODEL_CATALOG.antigravity.fast.find((m) => m.id === 'gemini-3.8-flash'),
+  assert.deepEqual(PROVIDER_MODEL_CATALOG.antigravity.fast, [
+    { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen', tier: 'fast' },
     { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', tier: 'fast' }
+  ]);
+  assert.deepEqual(PROVIDER_MODEL_CATALOG.antigravity.smart, [
+    { id: 'gemini-4-argon', label: 'Gemini 4 Argon', tier: 'smart' },
+    { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen', tier: 'smart' },
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', tier: 'smart' }
+  ]);
+  assert.deepEqual(
+    PROVIDER_MODEL_CATALOG.antigravity.all.map((m) => m.id),
+    ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-4-argon']
   );
-  assert.equal(PROVIDER_MODEL_CATALOG.antigravity.smart[0].id, 'gemini-3.1-pro-high');
-  assert.ok(PROVIDER_MODEL_CATALOG.antigravity.smart.some((m) => m.id === 'gemini-3.8-flash'));
-  for (const excludedId of ['claude-opus-5.5', 'claude-sonnet-5.5', 'gpt-oss-120b', 'gemini-4-carbon']) {
+  for (const excludedId of [
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.1-pro-high',
+    'gemini-3.1-pro-preview',
+    'claude-opus-5.5',
+    'claude-sonnet-5.5',
+    'gpt-oss-120b',
+    'gemini-4-carbon'
+  ]) {
     assert.equal(PROVIDER_MODEL_CATALOG.antigravity.all.some((m) => m.id === excludedId), false);
   }
 
@@ -1073,4 +1084,82 @@ test('saved gemini-3.8-flash picks are not silently migrated by createLLM or mig
   assert.equal(settings.models.gemini.fast, 'gemini-3.8-flash');
   assert.equal(settings.models.vertex.fast, 'gemini-3.8-flash');
   assert.equal(settings.models.antigravity.fast, 'gemini-3.8-flash');
+});
+
+test('listProviderModels for antigravity collapses suffixed live keys to one entry per family and marks argon smart', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { setProviderTokens } = require('../src/oauth-storage');
+
+  clearModelCatalogCache();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cue-ag-models-'));
+  const xorKey = 0x5a;
+  const oauthStorageOptions = {
+    storagePath: path.join(tmpDir, 'cue-oauth-tokens.enc'),
+    safeStorage: {
+      isEncryptionAvailable: () => true,
+      encryptString: (str) => {
+        const src = Buffer.from(str, 'utf8');
+        const out = Buffer.alloc(src.length);
+        for (let i = 0; i < src.length; i += 1) out[i] = src[i] ^ xorKey;
+        return out;
+      },
+      decryptString: (buf) => {
+        const out = Buffer.alloc(buf.length);
+        for (let i = 0; i < buf.length; i += 1) out[i] = buf[i] ^ xorKey;
+        return out.toString('utf8');
+      }
+    }
+  };
+
+  try {
+    setProviderTokens(
+      'antigravity',
+      {
+        accessToken: 'valid-ag-token',
+        refreshToken: 'valid-ag-refresh',
+        expiresAt: Date.now() + 3600_000,
+        projectId: 'ag-proj-test'
+      },
+      oauthStorageOptions
+    );
+
+    const mockFetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        models: {
+          'gemini-4-argon-medium': {},
+          'gemini-4-argon-high': {},
+          'gemini-4-argon-low': {},
+          'gemini-4-hydrogen-high': {},
+          'gemini-4-hydrogen-xhigh': {},
+          'gemini-4-hydrogen-medium': {},
+          'gemini-4-hydrogen-low': {},
+          'gemini-3.8-flash-high': {},
+          'gemini-3.8-flash-medium': {},
+          'gemini-3.8-flash-low': {}
+        }
+      })
+    });
+
+    const res = await listProviderModels(
+      'antigravity',
+      { oauthStorageOptions },
+      { fetchImpl: mockFetch, forceRefresh: true }
+    );
+    assert.equal(res.live, true);
+    assert.deepEqual(
+      res.models.map((m) => m.id),
+      ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-4-argon']
+    );
+    assert.equal(res.models.find((m) => m.id === 'gemini-4-argon').tier, 'smart');
+    assert.equal(res.models.find((m) => m.id === 'gemini-4-hydrogen').tier, 'fast');
+    assert.equal(res.models.find((m) => m.id === 'gemini-3.8-flash').tier, 'fast');
+    assert.deepEqual(res.fastModels.map((m) => m.id), ['gemini-4-hydrogen', 'gemini-3.8-flash']);
+    assert.deepEqual(res.smartModels.map((m) => m.id), ['gemini-4-argon']);
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
 });
